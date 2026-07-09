@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ManaVault</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260709-mobile-1" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>ManaVault</h1>
+      </div>
+      <nav class="tabs" aria-label="Hauptbereiche">
+        <button class="tab active" data-page="collectionPage">Sammlung</button>
+        <button class="tab" data-page="statsPage">Stats</button>
+        <button class="tab" data-page="decksPage">Decks</button>
+        <button class="tab" data-page="planningPage">Planung</button>
+        <button class="tab" data-page="locationsPage">Orte</button>
+        <button class="tab" data-page="backupPage">Backup</button>
+      </nav>
+    </header>
+    <div id="importStatus" class="import-status" hidden>
+      <span class="status-dot" aria-hidden="true"></span>
+      <span id="importStatusText">Scryfall Import laeuft.</span>
+    </div>
+
+    <main class="workspace">
+      <section class="content">
+        <section id="collectionPage" class="page active">
+          <div class="section-head collection-head">
+            <div>
+              <h2>Sammlung</h2>
+              <p>Eine Karte pro Druck, mit Menge und Wert.</p>
+            </div>
+            <div class="search-scope-wrap">
+              <input id="collectionSearch" type="search" placeholder="Sammlung suchen..." autocomplete="off" />
+              <label class="scope-toggle" title="In allen Scryfall-Karten suchen" aria-label="In allen Scryfall-Karten suchen">
+                <input id="collectionSearchAllCards" type="checkbox" />
+                <span class="scope-toggle-icon" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div class="collection-actions">
+              <select id="collectionExportFormat" aria-label="Export Format">
+                <option value="jsonl">JSONL</option>
+                <option value="markdown">Markdown</option>
+              </select>
+              <button id="exportCollection" class="secondary icon-button" type="button" title="Sammlung exportieren" aria-label="Sammlung exportieren">v</button>
+            </div>
+          </div>
+          <div class="filterbar compact">
+            <div class="color-filters" aria-label="Sammlungsfarben">
+              <button class="manaFilter collectionManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
+            </div>
+            <input id="collectionCmcMin" type="number" min="0" step="1" placeholder="MV min" />
+            <input id="collectionCmcMax" type="number" min="0" step="1" placeholder="MV max" />
+            <select id="collectionTypeFilter">
+              <option value="">Alle Typen</option>
+              <option value="Creature">Creature</option>
+              <option value="Instant">Instant</option>
+              <option value="Sorcery">Sorcery</option>
+              <option value="Artifact">Artifact</option>
+              <option value="Enchantment">Enchantment</option>
+              <option value="Planeswalker">Planeswalker</option>
+              <option value="Land">Land</option>
+            </select>
+            <select id="collectionTagFilter">
+              <option value="">Alle Tags</option>
+            </select>
+            <select id="collectionLegalFilter">
+              <option value="">Alle Formate</option>
+              <option value="standard">Standard legal</option>
+              <option value="pioneer">Pioneer legal</option>
+              <option value="modern">Modern legal</option>
+              <option value="legacy">Legacy legal</option>
+              <option value="vintage">Vintage legal</option>
+              <option value="commander">Commander legal</option>
+              <option value="pauper">Pauper legal</option>
+            </select>
+            <select id="collectionRarityFilter">
+              <option value="">Alle Seltenheiten</option>
+              <option value="common">Common</option>
+              <option value="uncommon">Uncommon</option>
+              <option value="rare">Rare</option>
+              <option value="mythic">Mythic</option>
+            </select>
+            <select id="collectionSetFilter">
+              <option value="">Alle Sets</option>
+            </select>
+            <input id="collectionMinPrice" type="number" min="0" step="0.5" placeholder="EUR min" />
+            <select id="collectionSort">
+              <option value="name">Name A-Z</option>
+              <option value="name_desc">Name Z-A</option>
+              <option value="cmc">Mana Value niedrig</option>
+              <option value="cmc_desc">Mana Value hoch</option>
+              <option value="value">Wert hoch</option>
+              <option value="value_asc">Wert niedrig</option>
+              <option value="price">Einzelpreis hoch</option>
+              <option value="price_asc">Einzelpreis niedrig</option>
+              <option value="count">Menge hoch</option>
+              <option value="free">Frei hoch</option>
+              <option value="rarity">Seltenheit hoch</option>
+              <option value="rarity_asc">Seltenheit niedrig</option>
+              <option value="set">Set / Nummer</option>
+              <option value="released">Neueste Drucke</option>
+            </select>
+            <button id="clearCollectionFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
+          </div>
+          <div id="collectionMeta" class="browser-meta"></div>
+          <div id="collectionGrid" class="card-grid"></div>
+          <button id="collectionLoadMore" class="load-more">Mehr Karten laden</button>
+        </section>
+
+        <section id="statsPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Stats</h2>
+              <p>Ueberblick ueber deine Sammlung.</p>
+            </div>
+            <button id="refreshStats" class="icon-button" title="Aktualisieren" aria-label="Aktualisieren">r</button>
+          </div>
+          <div id="collectionStats" class="stats-view"></div>
+        </section>
+
+        <section id="decksPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Decks</h2>
+              <p>Decks erstellen, bearbeiten, exportieren und pruefen.</p>
+            </div>
+            <form id="deckForm" class="toolbar">
+              <input id="deckName" placeholder="Deckname" required />
+              <input id="deckFormat" placeholder="Format" value="Commander" />
+              <button class="icon-button" title="Deck erstellen" aria-label="Deck erstellen">+</button>
+              <button id="openDeckBuilder" class="icon-button secondary" type="button" title="Deckbuilder oeffnen" aria-label="Deckbuilder oeffnen">o</button>
+            </form>
+          </div>
+          <div id="deckList" class="list"></div>
+        </section>
+
+        <section id="locationsPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Orte</h2>
+              <p>Boxen, Binder und Deck-Orte verwalten.</p>
+            </div>
+            <form id="locationForm" class="toolbar">
+              <input id="locationName" placeholder="Name, z.B. Box 1" required />
+              <input id="locationType" placeholder="Typ, z.B. Box" value="Box" />
+              <button class="icon-button" title="Ort anlegen" aria-label="Ort anlegen">+</button>
+            </form>
+          </div>
+          <div id="locationList" class="list"></div>
+        </section>
+
+        <section id="planningPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Planung</h2>
+              <p>Fehlende Karten, Proxy-Bedarf und Deckkonflikte.</p>
+            </div>
+            <button id="refreshPlanning" class="icon-button" title="Aktualisieren" aria-label="Aktualisieren">r</button>
+          </div>
+          <div id="planningSummary" class="planning-summary"></div>
+          <div id="planningList" class="list"></div>
+        </section>
+
+        <section id="backupPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Backup</h2>
+              <p>Datenbank sichern oder eine ManaVault-Sicherung einspielen.</p>
+            </div>
+          </div>
+          <div class="backup-grid">
+            <article class="backup-panel">
+              <div>
+                <h3>Export</h3>
+                <p class="muted">Speichert eine vollstaendige `.sqlite3`-Sicherung.</p>
+              </div>
+              <button id="downloadBackup" class="icon-button" title="Backup exportieren" aria-label="Backup exportieren">v</button>
+            </article>
+            <article class="backup-panel">
+              <div>
+                <h3>Import</h3>
+                <p class="muted">Ersetzt die aktuelle Datenbank durch eine Sicherung.</p>
+              </div>
+              <input id="backupImportFile" class="file-input" type="file" accept=".sqlite3,.db,application/vnd.sqlite3,application/octet-stream" />
+              <button id="importBackup" class="icon-button" title="Backup importieren" aria-label="Backup importieren">^</button>
+            </article>
+            <article class="backup-panel">
+              <div>
+                <h3>Scryfall</h3>
+                <p class="muted">Kartendaten aktualisieren.</p>
+              </div>
+              <button id="importScryfall" class="icon-button" title="Scryfall Import" aria-label="Scryfall Import">s</button>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="deckBuilderDialog" class="deck-builder-dialog">
+      <div id="builderPanel" class="builder dialog-body">
+        <button class="icon-close" type="button" aria-label="Schliessen" onclick="document.getElementById('deckBuilderDialog').close()">x</button>
+        <div class="builder-head">
+          <div>
+            <h2>Deckbuilder</h2>
+            <select id="deckSelect"></select>
+          </div>
+        </div>
+
+        <div class="builder-tools">
+          <button id="newDeckFromBuilder" class="icon-button" title="Deck erstellen" aria-label="Deck erstellen">+</button>
+          <button id="exportDeck" class="icon-button" title="Deck exportieren" aria-label="Deck exportieren">v</button>
+        </div>
+
+        <details class="deck-import-panel">
+          <summary>Deckliste aus Text</summary>
+          <textarea id="deckImportText" placeholder="1 Sol Ring&#10;2 Counterspell"></textarea>
+          <div class="builder-tools import-tools">
+            <label class="replace-check">
+              <input id="replaceDeck" type="checkbox" />
+              <span>Deck vorher leeren</span>
+            </label>
+            <button id="importDeck" class="icon-button" title="Liste uebernehmen" aria-label="Liste uebernehmen">^</button>
+          </div>
+        </details>
+
+        <div id="deckDetail" class="builder-list"></div>
+        <div id="deckStatus" class="builder-status"></div>
+      </div>
+    </dialog>
+
+    <dialog id="cardDialog">
+      <form method="dialog" class="dialog-body">
+        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <div id="cardDialogContent"></div>
+      </form>
+    </dialog>
+
+    <dialog id="decisionDialog">
+      <form method="dialog" class="dialog-body">
+        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <div id="decisionContent"></div>
+      </form>
+    </dialog>
+
+    <dialog id="locationDialog">
+      <form method="dialog" class="dialog-body">
+        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <div id="locationDialogContent"></div>
+      </form>
+    </dialog>
+
+    <dialog id="deleteLocationDialog">
+      <form method="dialog" class="dialog-body">
+        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <div id="deleteLocationContent"></div>
+      </form>
+    </dialog>
+
+    <dialog id="exportDialog">
+      <form method="dialog" class="dialog-body">
+        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <h2>Deck Export</h2>
+        <textarea id="exportText" readonly></textarea>
+      </form>
+    </dialog>
+
+    <div id="toast"></div>
+    <div id="cardPreview" class="card-preview" aria-hidden="true"></div>
+    <script src="/static/app.js?v=20260709-mobile-1"></script>
+  </body>
+</html>
