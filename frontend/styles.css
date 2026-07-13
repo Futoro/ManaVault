@@ -518,6 +518,21 @@ small {
   width: 20px;
 }
 
+.icon-button .qr-icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.labeled-icon-button {
+  gap: 0.45rem;
+  padding-inline: 0.7rem;
+}
+
+.labeled-icon-button span {
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
 .icon-button.danger,
 .icon-button.danger:hover {
   color: var(--bad);
@@ -559,12 +574,16 @@ small {
   justify-content: center;
   min-width: 42px;
   padding-inline: 0.65rem;
+  position: relative;
 }
 
 .scope-toggle input {
+  height: 1px;
+  inset: 0 auto auto 0;
   opacity: 0;
   pointer-events: none;
   position: absolute;
+  width: 1px;
 }
 
 .scope-toggle-icon {
@@ -1516,13 +1535,27 @@ body.public-deck-view .content {
   border-radius: 8px;
   display: inline-flex;
   gap: 0.35rem;
-  justify-content: center;
+  justify-content: flex-start;
   min-height: 40px;
-  padding: 0.35rem 0.45rem;
+  padding: 0.45rem 0.6rem;
 }
 
 .status-metric strong {
-  font-size: 0.95rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.status-metric-copy {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.status-metric-copy small {
+  color: currentColor;
+  font-size: 0.68rem;
+  font-weight: 750;
+  line-height: 1;
+  opacity: 0.78;
 }
 
 .status-metric.good {
@@ -1630,6 +1663,26 @@ dialog {
 .deck-builder-head {
   align-items: center;
   grid-template-columns: minmax(260px, 1fr) auto;
+  margin-bottom: 0.75rem;
+}
+
+.deck-builder-title {
+  align-items: end;
+  display: grid;
+  gap: 0.18rem 0.8rem;
+  grid-template-columns: auto minmax(260px, 1fr);
+}
+
+.deck-builder-title .section-kicker {
+  grid-column: 1 / -1;
+}
+
+.deck-builder-title h2 {
+  margin: 0;
+}
+
+.deck-builder-title select {
+  min-height: 40px;
 }
 
 .deck-builder-page .builder-tools {
@@ -1637,14 +1690,14 @@ dialog {
 }
 
 .deck-variant-bar {
-  align-items: end;
-  background: #f8f6f0;
+  align-items: center;
+  background: #f4f7f5;
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
   gap: 0.75rem;
   grid-template-columns: minmax(190px, 280px) 1fr auto;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.85rem;
   padding: 0.7rem 0.8rem;
 }
 
@@ -1662,11 +1715,18 @@ dialog {
 
 .deck-edit-state {
   align-self: center;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 999px;
   color: var(--muted);
   font-size: 0.9rem;
+  justify-self: start;
+  padding: 0.38rem 0.65rem;
 }
 
 .deck-edit-state.is-dirty {
+  background: #fff7e6;
+  border-color: #f3d29b;
   color: #8a5a00;
   font-weight: 700;
 }
@@ -1719,6 +1779,38 @@ dialog {
   margin-bottom: 0.65rem;
 }
 
+.builder-filter-disclosure {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.builder-filter-disclosure summary {
+  align-items: center;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  font-size: 0.84rem;
+  font-weight: 800;
+  gap: 0.55rem;
+  justify-content: space-between;
+  list-style-position: inside;
+  padding: 0.55rem 0.65rem;
+}
+
+.builder-filter-disclosure summary small {
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.builder-filter-disclosure[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.builder-filter-disclosure .builder-filterbar {
+  padding: 0.65rem;
+}
+
 .builder-filterbar,
 .builder-filterbar.compact {
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -1752,6 +1844,42 @@ dialog {
   margin-bottom: 0;
 }
 
+.section-kicker {
+  color: var(--accent);
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 850;
+  letter-spacing: 0.09em;
+  margin-bottom: 0.18rem;
+  text-transform: uppercase;
+}
+
+.deck-list-head {
+  align-items: end;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.7rem;
+}
+
+.deck-count-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: flex-end;
+}
+
+.deck-count-summary > span {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.deck-count-summary strong {
+  color: var(--ink);
+}
+
 .deck-workbench-divider {
   align-self: stretch;
   background: linear-gradient(90deg, transparent 0 35%, var(--line) 35% 65%, transparent 65%);
@@ -1780,7 +1908,7 @@ dialog {
 
 #deckDetail {
   display: flex;
-  flex: 1;
+  flex: none;
   flex-direction: column;
   min-height: 0;
 }
@@ -1838,9 +1966,39 @@ dialog {
 }
 
 .builder-status {
+  border-top: 2px solid var(--line);
   flex: 0 0 auto;
-  margin-bottom: 0.9rem;
-  margin-top: 0;
+  margin-bottom: 0;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+}
+
+.deck-status-heading {
+  align-items: end;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.deck-status-heading h3 {
+  margin: 0;
+}
+
+.status-summary {
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 850;
+  padding: 0.3rem 0.55rem;
+}
+
+.status-summary.has-missing {
+  background: #fee2e2;
+  color: var(--bad);
+}
+
+.status-summary.is-complete {
+  background: #dcfce7;
+  color: var(--good);
 }
 
 .token-status-block {
@@ -2089,8 +2247,10 @@ dialog {
 
 .deck-slot-card .slot-decrement {
   color: var(--accent);
-  font-size: 1.25rem;
-  font-weight: 900;
+}
+
+.deck-slot-card .slot-zone {
+  color: #315b71;
 }
 
 .deck-slot-card.is-cover {
@@ -2675,6 +2835,28 @@ dialog {
 
   .deck-builder-head {
     grid-template-columns: 1fr;
+  }
+
+  .deck-builder-title {
+    grid-template-columns: 1fr;
+  }
+
+  .deck-builder-title .section-kicker {
+    grid-column: auto;
+  }
+
+  .deck-builder-page .builder-tools {
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .deck-list-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .deck-count-summary {
+    justify-content: flex-start;
   }
 
   .deck-workbench-divider {

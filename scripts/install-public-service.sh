@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 SERVICE_NAME="${MANAVAULT_PUBLIC_SERVICE_NAME:-manavault-public}"
-APP_DIR="$(pwd)"
 PORT="${MANAVAULT_PUBLIC_PORT:-8001}"
 RUN_USER="${SUDO_USER:-$(whoami)}"
 RUN_GROUP="$(id -gn "$RUN_USER")"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Bitte mit sudo starten:"
-  echo "  sudo ./install-linux-public-service.sh"
+  echo "  sudo ./scripts/install-public-service.sh"
   exit 1
 fi
 
 if [ ! -x ".venv/bin/python" ]; then
-  echo "Python-Umgebung fehlt. Fuehre zuerst install-linux-service.sh aus."
+  echo "Python-Umgebung fehlt. Fuehre zuerst sudo ./scripts/install.sh aus."
   exit 1
 fi
 

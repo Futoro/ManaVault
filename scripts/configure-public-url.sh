@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 PUBLIC_URL="${1:-}"
-if [[ ! "$PUBLIC_URL" =~ ^https://[A-Za-z0-9.-]+/?$ ]]; then
+if [[ ! "$PUBLIC_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]]; then
   echo "Aufruf:"
-  echo "  ./configure-public-url.sh https://decks.deinedomain.ch"
+  echo "  ./scripts/configure-public-url.sh https://decks.deinedomain.ch"
+  echo "  ./scripts/configure-public-url.sh https://geraet.tailnet.ts.net:8443"
   exit 1
 fi
 

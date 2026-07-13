@@ -1,17 +1,17 @@
 [Unit]
-Description=ManaVault public read-only deck viewer
+Description=ManaVault authenticated remote access
 After=network-online.target manavault.service
 Wants=network-online.target
 Requires=manavault.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/adrian/MagicVault
-ExecStart=/home/adrian/MagicVault/.venv/bin/python -m uvicorn backend.public:app --host 127.0.0.1 --port 8001
+WorkingDirectory=/opt/manavault
+ExecStart=/opt/manavault/.venv/bin/python -m uvicorn backend.remote:app --host 127.0.0.1 --port 8002
 Restart=on-failure
 RestartSec=5
-User=adrian
-Group=adrian
+User=manavault
+Group=manavault
 Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true

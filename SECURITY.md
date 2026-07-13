@@ -13,4 +13,12 @@ Beschreibe nach Moeglichkeit:
 
 ## Betriebshinweis
 
-Die Verwaltungsoberflaeche auf Port `8000` besitzt derzeit keine Benutzeranmeldung und darf nicht direkt ins Internet gestellt werden. Fuer externe Deckfreigaben ist ausschliesslich der getrennte, schreibgeschuetzte Public-Service vorgesehen.
+ManaVault trennt drei Dienste:
+
+- Port `8000`: lokale Verwaltungsoberflaeche ohne Login; niemals direkt ins Internet stellen.
+- Port `8001`: schreibgeschuetzte, tokenbasierte Deckfreigaben; nur ueber einen HTTPS-Tunnel veroeffentlichen.
+- Port `8002`: vollstaendige Verwaltung mit eigenem Login; nur ueber HTTPS veroeffentlichen.
+
+Passwoerter des externen Zugangs werden mit Scrypt gehasht. Sitzungen verwenden signierte, zeitlich begrenzte Secure-/HttpOnly-/SameSite-Cookies. Trotzdem ersetzt der Login weder HTTPS noch sichere, individuelle Passwoerter.
+
+Die Dateien unter `data/` enthalten Sammlung, Decks, Freigabeschluessel und Zugangsdaten. Dieser Ordner wird von Git ignoriert und darf weder in Commits noch in Fehlerberichte aufgenommen werden.

@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 SERVICE_NAME="${MANAVAULT_BACKUP_SERVICE_NAME:-manavault-backup}"
-APP_DIR="$(pwd)"
 RUN_USER="${SUDO_USER:-$(whoami)}"
 RUN_GROUP="$(id -gn "$RUN_USER")"
 ENV_FILE="/etc/default/${SERVICE_NAME}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Bitte mit sudo starten:"
-  echo "  sudo ./install-linux-backup-timer.sh"
+  echo "  sudo ./scripts/install-backup-timer.sh"
   exit 1
 fi
 
-chmod +x "${APP_DIR}/backup-linux.sh"
+chmod +x "${SCRIPT_DIR}/backup.sh"
 
 if [ ! -f "$ENV_FILE" ]; then
   cat > "$ENV_FILE" <<EOF
@@ -35,7 +33,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/backup-linux.sh
+ExecStart=${SCRIPT_DIR}/backup.sh
 User=${RUN_USER}
 Group=${RUN_GROUP}
 EnvironmentFile=-${ENV_FILE}

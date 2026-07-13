@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Bitte mit sudo starten:"
-  echo "  sudo ./install-live-scanner-linux.sh"
+  echo "  sudo ./scripts/install-scanner.sh"
   exit 1
 fi
 
-RUN_USER="${SUDO_USER:-adrian}"
+RUN_USER="${SUDO_USER:-$(whoami)}"
+
+if [ ! -x ".venv/bin/python" ]; then
+  echo "Python-Umgebung fehlt. Fuehre zuerst sudo ./scripts/install.sh aus."
+  exit 1
+fi
 
 echo "Installiere deutsche und englische OCR..."
 apt-get update

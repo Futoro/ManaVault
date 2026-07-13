@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Version pruefen
+        run: |
+          test "${GITHUB_REF_NAME}" = "v$(tr -d '\r\n' < VERSION)"
+
+      - name: Saubere Quellpakete erstellen
+        run: |
+          name="ManaVault-${GITHUB_REF_NAME#v}"
+          git archive --format=zip --prefix="${name}/" --output="${name}.zip" HEAD
+          git archive --format=tar.gz --prefix="${name}/" --output="${name}.tar.gz" HEAD
+
+      - name: GitHub Release erstellen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            ManaVault-*.zip ManaVault-*.tar.gz \
+            --generate-notes \
+            --title "ManaVault ${GITHUB_REF_NAME#v}"
