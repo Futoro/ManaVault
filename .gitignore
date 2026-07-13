@@ -1,22 +1,35 @@
-.venv/
-__pycache__/
-*.py[cod]
+# Laufzeitdaten und Zugangsdaten
 data/
-.pytest_cache/
-.agents/
-.codex/
-*.zip
 *.sqlite3
 *.sqlite3-*
 *.db
+*.csv
 *.log
 *.tmp
-cardmarket-*.csv
-.DS_Store
-Thumbs.db
+.env
+.env.*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build- und Release-Artefakte
+build/
+dist/
+*.egg-info/
+*.zip
+
+# Editoren, Betriebssystem und lokale Werkzeuge
 .idea/
 .vscode/
-scanner_samples/images/*
-!scanner_samples/images/.gitkeep
-scanner_samples/warps/
-scanner_samples/benchmark-results.json
+.DS_Store
+Thumbs.db
+.agents/
+.codex/

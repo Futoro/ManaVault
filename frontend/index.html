@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ManaVault</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260713-deck-variants" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260713-deck-layout-polish" />
   </head>
   <body>
     <header class="topbar">
@@ -182,12 +182,13 @@
         <section id="deckBuilderPage" class="page deck-builder-page">
           <div id="builderPanel" class="builder">
             <div class="section-head deck-builder-head">
-              <div>
+              <div class="deck-builder-title">
+                <span class="section-kicker">Deck bearbeiten</span>
                 <h2>Deckbuilder</h2>
-                <select id="deckSelect"></select>
+                <select id="deckSelect" aria-label="Deck auswählen"></select>
               </div>
               <div class="builder-tools">
-                <button id="deckQrButton" class="icon-button secondary" type="button" title="QR-Code erstellen" aria-label="QR-Code erstellen">QR</button>
+                <button id="deckQrButton" class="icon-button labeled-icon-button secondary" type="button" title="QR-Code erstellen" aria-label="QR-Code erstellen">QR-Code</button>
                 <button id="backToDecks" class="icon-button secondary" type="button" title="Zurueck zu Decks" aria-label="Zurueck zu Decks">x</button>
               </div>
             </div>
@@ -220,7 +221,12 @@
                       <span id="deckBuilderScopeLabel" class="scope-toggle-label">Sammlung</span>
                     </label>
                   </div>
-                  <div class="filterbar compact builder-filterbar">
+                  <details class="builder-filter-disclosure">
+                    <summary>
+                      <span>Weitere Filter</span>
+                      <small>Mana, Typ, Set und mehr</small>
+                    </summary>
+                    <div class="filterbar compact builder-filterbar">
                     <div class="color-filters" aria-label="Deckbuilder Farben">
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
@@ -288,16 +294,17 @@
                       <option value="set">Set / Nummer</option>
                       <option value="released">Neueste Drucke</option>
                     </select>
-                    <button id="clearDeckBuilderFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
-                  </div>
+                      <button id="clearDeckBuilderFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
+                    </div>
+                  </details>
                 </div>
                 <div id="deckBuilderCollection" class="deck-builder-card-grid"></div>
                 <button id="deckBuilderLoadMore" class="load-more">Mehr Karten laden</button>
               </section>
               <div id="deckWorkbenchDivider" class="deck-workbench-divider" role="separator" aria-orientation="vertical" title="Ziehen zum Anpassen"></div>
               <section class="deck-workbench-pane deck-side-pane">
-                <div id="deckStatus" class="builder-status"></div>
                 <div id="deckDetail" class="builder-list"></div>
+                <div id="deckStatus" class="builder-status"></div>
               </section>
             </div>
           </div>
@@ -512,6 +519,6 @@
     <div id="toast"></div>
     <div id="cardPreview" class="card-preview" aria-hidden="true"></div>
     <div id="appVersion" class="app-version" aria-label="ManaVault Version"></div>
-    <script src="/static/app.js?v=20260713-deck-variants"></script>
+    <script src="/static/app.js?v=20260713-deck-layout-polish"></script>
   </body>
 </html>

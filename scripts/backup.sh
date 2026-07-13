@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BACKUP_DIR="${MANAVAULT_BACKUP_DIR:-data/backups}"

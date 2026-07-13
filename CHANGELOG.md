@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.85 - 2026-07-13
+
+- Das Repository ist auf den Linux-Serverbetrieb fokussiert und enthaelt keine veralteten Windows-Batches oder historischen Update-Pakete mehr.
+- Betriebswerkzeuge liegen gesammelt unter `scripts/`, Anleitungen unter `docs/` und systemd-Beispiele unter `deploy/systemd/`.
+- Scanner-Benchmarkdaten und erzeugte Release-ZIPs sind keine Bestandteile des veroeffentlichten Quellpakets mehr.
+- Installation, externer Zugriff, Sicherheit und Aktualisierung sind fuer einen frischen eigenen ManaVault-Server neu dokumentiert.
+- Die CI verhindert, dass ZIP-Dateien, Windows-Batches oder Datenbanken versehentlich ins Repository gelangen.
+
+## 0.1.84 - 2026-07-13
+
+- Die vollstaendige ManaVault-Oberflaeche kann ueber einen separaten Dienst mit Benutzername und Passwort extern genutzt werden.
+- Der geschuetzte Dienst lauscht ausschliesslich auf `127.0.0.1:8002` und ist fuer einen eigenen Tailscale Funnel auf Port 10000 vorgesehen.
+- Passwoerter werden mit Scrypt und zufaelligem Salt gehasht; das Klartextpasswort wird nicht gespeichert.
+- Anmeldungen verwenden signierte, zeitlich begrenzte Secure-/HttpOnly-/SameSite-Cookies und begrenzen wiederholte Fehlversuche.
+- Die oeffentliche schreibgeschuetzte Deckansicht auf Port 8443 bleibt ohne Login getrennt erhalten.
+- Das Konfigurationsskript fuer oeffentliche QR-Adressen akzeptiert nun auch HTTPS-Adressen mit Portnummer.
+
 ## 0.1.83 - 2026-07-13
 
 - Decks koennen mehrere benannte Varianten besitzen; nur die aktive Variante belegt Karten aus der Sammlung.

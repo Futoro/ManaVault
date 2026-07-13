@@ -1,0 +1,22 @@
+[Unit]
+Description=ManaVault public read-only deck viewer
+After=network-online.target manavault.service
+Wants=network-online.target
+Requires=manavault.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/manavault
+ExecStart=/opt/manavault/.venv/bin/python -m uvicorn backend.public:app --host 127.0.0.1 --port 8001
+Restart=on-failure
+RestartSec=5
+User=manavault
+Group=manavault
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

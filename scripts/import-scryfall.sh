@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-cd "$(dirname "$0")"
-
-HOST="${MANAVAULT_HOST:-0.0.0.0}"
-PORT="${MANAVAULT_PORT:-8000}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -23,10 +20,8 @@ echo "Pruefe Abhaengigkeiten..."
 ".venv/bin/python" -m pip install -r requirements.txt
 
 echo
-echo "ManaVault startet..."
-echo "Auf diesem Geraet:  http://127.0.0.1:${PORT}"
-echo "Im Netzwerk:        http://<raspberry-pi-ip>:${PORT}"
-echo "Beenden mit Strg+C."
+echo "Scryfall Bulk Data wird geladen und importiert."
+echo "Das kann beim ersten Mal mehrere Minuten dauern."
 echo
 
-exec ".venv/bin/python" -m uvicorn backend.main:app --host "$HOST" --port "$PORT"
+exec ".venv/bin/python" -m backend.import_scryfall "$@"

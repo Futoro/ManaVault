@@ -30,13 +30,20 @@ jobs:
         run: python -m pip install "fastapi>=0.110"
 
       - name: Python-Syntax pruefen
-        run: python -m py_compile backend/main.py backend/public.py backend/import_scryfall.py
+        run: python -m py_compile backend/*.py
 
       - name: JavaScript-Syntax pruefen
         run: node --check frontend/app.js
 
       - name: Shell-Skripte pruefen
-        run: bash -n ./*.sh
+        run: bash -n scripts/*.sh
+
+      - name: Repository auf Artefakte pruefen
+        run: |
+          if git ls-files '*.zip' '*.bat' '*.sqlite3' '*.db' | grep -q .; then
+            echo 'Release-Dateien, Windows-Batches oder Datenbanken duerfen nicht versioniert werden.'
+            exit 1
+          fi
 
       - name: Leere Datenbank initialisieren
         env:

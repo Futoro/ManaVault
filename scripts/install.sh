@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 SERVICE_NAME="${MANAVAULT_SERVICE_NAME:-manavault}"
 HOST="${MANAVAULT_HOST:-0.0.0.0}"
 PORT="${MANAVAULT_PORT:-8000}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-APP_DIR="$(pwd)"
 RUN_USER="${SUDO_USER:-$(whoami)}"
 RUN_GROUP="$(id -gn "$RUN_USER")"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Bitte mit sudo starten:"
-  echo "  sudo ./install-linux-service.sh"
+  echo "  sudo ./scripts/install.sh"
   exit 1
 fi
 
@@ -48,6 +46,10 @@ RestartSec=5
 User=${RUN_USER}
 Group=${RUN_GROUP}
 Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -57,9 +59,8 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
-if [ -x "./install-linux-public-service.sh" ]; then
-  ./install-linux-public-service.sh
-fi
+"${SCRIPT_DIR}/install-public-service.sh"
+"${SCRIPT_DIR}/install-remote-service.sh"
 
 echo
 echo "ManaVault laeuft jetzt als Server-Dienst."

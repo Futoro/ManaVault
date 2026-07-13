@@ -474,6 +474,7 @@ function setupStaticIconButtons() {
   setIconButton("exportCollection", "download", "Sammlung exportieren");
   setIconButton("openDeckBuilder", "deck", "Deckbuilder oeffnen");
   setIconButton("deckQrButton", "qr", "QR-Code erstellen");
+  $("deckQrButton")?.insertAdjacentHTML("beforeend", "<span>QR-Code</span>");
   setIconButton("backToDecks", "back", "Zurueck zu Decks");
   setIconButton("downloadUserBackup", "download", "Datenbackup exportieren");
   setIconButton("importUserBackup", "upload", "Datenbackup importieren");
@@ -1886,7 +1887,7 @@ function iconSvg(name) {
     proxy: `<span class="action-symbol proxy-symbol">P</span><span class="action-plus">+</span>`,
     proxyBadge: `<span class="metric-letter proxy-symbol">P</span>`,
     open: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>`,
-    qr: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M14 14h3v3h-3zM18 14h3v7h-3M14 19h3v2h-3"></path></svg>`,
+    qr: `<svg class="qr-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3V3Zm2 2v4h4V5H5Zm8-2h8v8h-8V3Zm2 2v4h4V5h-4ZM3 13h8v8H3v-8Zm2 2v4h4v-4H5Zm8-2h3v3h-3v-3Zm5 0h3v5h-2v3h-3v-5h2v-3Zm-5 5h3v3h-3v-3Zm6 1h2v2h-2v-2Z"></path></svg>`,
     edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>`,
     delete: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 13h10l1-13"></path><path d="M9 7V4h6v3"></path></svg>`,
     cover: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2l-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"></path></svg>`,
@@ -1899,6 +1900,9 @@ function iconSvg(name) {
     refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M19.2 11A7.5 7.5 0 1 0 17 17.3"></path></svg>`,
     allCards: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>`,
     check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"></path></svg>`,
+    minus: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"></path></svg>`,
+    moveToSideboard: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="9" height="13" rx="2"></rect><path d="M15 8h6v11h-6"></path><path d="m11 12 4 0"></path><path d="m13 10 2 2-2 2"></path></svg>`,
+    moveToDeck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="12" y="5" width="9" height="13" rx="2"></rect><path d="M9 8H3v11h6"></path><path d="m13 12-4 0"></path><path d="m11 10-2 2 2 2"></path></svg>`,
     box: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8 12 4l8 4-8 4-8-4Z"></path><path d="M4 8v8l8 4 8-4V8"></path><path d="M12 12v8"></path></svg>`,
     missing: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6"></path><path d="M12 17h.01"></path></svg>`,
   };
@@ -2423,12 +2427,19 @@ async function loadDeck() {
   const sideboardCount = sideboard.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
   const tokenCount = tokens.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
   $("deckDetail").innerHTML = `
-    <div class="pane-head">
-      <h3>${escapeHtml(detail.deck.name)}</h3>
-      <span class="muted">${cardCount} Karten${sideboardCount ? ` · ${sideboardCount} Sideboard` : ""}${tokenCount ? ` · ${tokenCount} Tokens` : ""}</span>
+    <div class="pane-head deck-list-head">
+      <div>
+        <span class="section-kicker">Aktive Variante</span>
+        <h3>Deckliste</h3>
+      </div>
+      <div class="deck-count-summary" aria-label="Deckumfang">
+        <span><strong>${cardCount}</strong> Hauptdeck</span>
+        <span><strong>${sideboardCount}</strong> Sideboard</span>
+        ${tokenCount ? `<span><strong>${tokenCount}</strong> Tokens</span>` : ""}
+      </div>
     </div>
     <section class="deck-slot-section">
-      <div class="deck-slot-section-head"><h4>Deckkarten</h4></div>
+      <div class="deck-slot-section-head"><h4>Hauptdeck</h4><span>${cardCount}</span></div>
       <div class="deck-card-grid">
         ${deckCards.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Deckkarten. Klicke links bei Karten auf 'Ins Deck'.")}
       </div>
@@ -2463,8 +2474,8 @@ function deckSlotTile(slot) {
       </button>
       <div class="tile-meta-row">
         <span class="count-badge">${slot.quantity}x</span>
-        <button class="icon-button secondary slot-decrement" title="Eine Karte entfernen" aria-label="Eine Karte entfernen" onclick="decrementSlot(${slot.id}, event)">&minus;</button>
-        ${slot.is_token ? `<span></span>` : `<button class="icon-button secondary slot-zone" title="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" aria-label="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" onclick="moveSlotZone(${slot.id}, '${slot.zone === "sideboard" ? "mainboard" : "sideboard"}')">${slot.zone === "sideboard" ? "D" : "S"}</button>`}
+        <button class="icon-button secondary slot-decrement" title="Eine Karte entfernen" aria-label="Eine Karte entfernen" onclick="decrementSlot(${slot.id}, event)">${iconSvg("minus")}</button>
+        ${slot.is_token ? `<span></span>` : `<button class="icon-button secondary slot-zone" title="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" aria-label="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" onclick="moveSlotZone(${slot.id}, '${slot.zone === "sideboard" ? "mainboard" : "sideboard"}')">${iconSvg(slot.zone === "sideboard" ? "moveToDeck" : "moveToSideboard")}</button>`}
         <button class="icon-button secondary cover-button${slot.is_cover ? " active" : ""}" title="Als Deckblatt setzen" aria-label="Als Deckblatt setzen" onclick="setDeckCover(${slot.card_id})">${iconSvg(slot.is_cover ? "coverFilled" : "cover")}</button>
         <button class="icon-button secondary danger" title="Aus Deckliste entfernen" aria-label="Aus Deckliste entfernen" onclick="deleteSlot(${slot.id})">${iconSvg("delete")}</button>
       </div>
@@ -2612,7 +2623,13 @@ function renderStatus(status) {
     return Number(item.missing || 0) > 0 && Number(item.free_in_collection || 0) + freeProxy > 0;
   });
   $("deckStatus").innerHTML = `
-    <h3>Status</h3>
+    <div class="deck-status-heading">
+      <div>
+        <span class="section-kicker">Deckstatus</span>
+        <h3>Verfügbarkeit</h3>
+      </div>
+      <span class="status-summary ${missingTotal ? "has-missing" : "is-complete"}">${missingTotal ? `${missingTotal} fehlen` : "Vollständig"}</span>
+    </div>
     <div class="status-strip">
       ${statusMetric("check", ownedTotal, "Vorhanden", "good")}
       ${statusMetric("proxyBadge", proxyTotal, "Proxy", "warn")}
@@ -2728,7 +2745,7 @@ function statusMetric(icon, value, label, tone) {
   return `
     <span class="status-metric ${tone}" title="${escapeHtml(label)}" aria-label="${escapeHtml(`${value} ${label}`)}">
       ${iconSvg(icon)}
-      <strong>${value}</strong>
+      <span class="status-metric-copy"><strong>${value}</strong><small>${escapeHtml(label)}</small></span>
     </span>
   `;
 }
