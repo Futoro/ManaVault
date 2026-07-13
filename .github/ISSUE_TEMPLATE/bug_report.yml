@@ -1,0 +1,46 @@
+name: Fehlerbericht
+description: Einen reproduzierbaren Fehler in ManaVault melden
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Danke fuer den Fehlerbericht. Bitte keine Sammlungsdaten oder Zugangsdaten hochladen.
+  - type: input
+    id: version
+    attributes:
+      label: ManaVault-Version
+      placeholder: 0.1.83
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: Betriebssystem
+      options:
+        - Windows
+        - Linux / Raspberry Pi
+        - Anderes
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Fehlerbeschreibung
+      description: Was ist passiert und was haettest du erwartet?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Schritte zum Nachstellen
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevante Meldungen
+      description: Entferne persoenliche Daten, Freigabe-Tokens und lokale Pfade.
+      render: shell

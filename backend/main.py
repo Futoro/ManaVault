@@ -1,32 +1,49 @@
 from __future__ import annotations
 
 import json
+import base64
+import io
+import os
 import re
+import secrets
 import shutil
 import sqlite3
+import time
+import unicodedata
 import urllib.parse
 import urllib.request
+import uuid
+import zipfile
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "manavault.sqlite3"
+DB_PATH = Path(os.environ.get("MANAVAULT_DB_PATH", DATA_DIR / "manavault.sqlite3"))
 BACKUP_DIR = DATA_DIR / "backups"
 FRONTEND_DIR = BASE_DIR / "frontend"
+VERSION_FILE = BASE_DIR / "VERSION"
+PUBLIC_URL_FILE = DATA_DIR / "public-url.txt"
 SCRYFALL_BULK_URL = "https://api.scryfall.com/bulk-data"
+SCRYFALL_TOKEN_SEARCH_URL = (
+    "https://api.scryfall.com/cards/search?unique=prints&order=set&include_multilingual=true&q="
+    "%28layout%3Atoken%20or%20layout%3Adouble_faced_token%20or%20layout%3Aemblem%29"
+)
 USER_AGENT = "ManaVault/0.1 (local collection manager; no api keys)"
 CARDMARKET_SEARCH_URL = "https://www.cardmarket.com/en/Magic/Products/Search?searchString="
 SCRYFALL_BULK_TYPE = "all_cards"
 SCRYFALL_IMPORT_LOCK = Lock()
+RAPID_OCR_LOCK = Lock()
+RAPID_OCR_ENGINE: Any = None
 SCRYFALL_IMPORT_STATUS: dict[str, Any] = {
     "running": False,
     "phase": "idle",
@@ -54,6 +71,7 @@ class ImportRequest(BaseModel):
     local_file: str | None = None
     limit: int | None = None
     bulk_type: str | None = None
+    tokens_only: bool = False
 
 
 def set_scryfall_import_status(**updates: Any) -> None:
@@ -99,6 +117,24 @@ class CopyIn(BaseModel):
     note: str | None = None
 
 
+class CopyBatchIn(CopyIn):
+    quantity: int = 1
+
+
+class ScannerFrameIn(BaseModel):
+    image_data: str
+    collector_data: str | None = None
+    collector_wide_data: str | None = None
+    full_image_data: str | None = None
+    live: bool = False
+
+
+class ScannerReportIn(BaseModel):
+    image_data: str
+    expected: str | None = None
+    result: dict[str, Any] | None = None
+
+
 class CopyPatch(BaseModel):
     card_id: int | None = None
     is_proxy: bool | None = None
@@ -115,6 +151,7 @@ class DeckSlotIn(BaseModel):
     quantity: int = 1
     allow_proxy: bool = True
     note: str | None = None
+    zone: str = "mainboard"
 
 
 class DeckAddCardIn(BaseModel):
@@ -123,10 +160,35 @@ class DeckAddCardIn(BaseModel):
     action: str = "auto"
     copy_id: int | None = None
     allow_proxy: bool = True
+    zone: str = "mainboard"
+
+
+class DeckSlotZoneIn(BaseModel):
+    zone: str
+
+
+class DeckVariantCreateIn(BaseModel):
+    name: str
+    base_name: str = "Original"
+
+
+class DeckVariantPatchIn(BaseModel):
+    name: str
+
+
+DECK_ZONES = {"mainboard", "sideboard"}
+
+
+def normalized_deck_zone(value: str | None) -> str:
+    zone = str(value or "mainboard").strip().lower()
+    if zone not in DECK_ZONES:
+        raise HTTPException(status_code=400, detail="Unbekannter Deckbereich.")
+    return zone
 
 
 class DeckAssignFreeIn(BaseModel):
     card_id: int | None = None
+    scope: str = "cards"
 
 
 class DeckListImport(BaseModel):
@@ -195,6 +257,124 @@ def validate_backup_database(path: Path) -> None:
         raise HTTPException(status_code=400, detail="Backup-Datei passt nicht zu ManaVault.")
 
 
+def rows_as_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+def table_columns(db: sqlite3.Connection, table: str) -> list[str]:
+    return [row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def insert_backup_rows(db: sqlite3.Connection, table: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    allowed_columns = set(table_columns(db, table))
+    for row in rows:
+        columns = [column for column in row.keys() if column in allowed_columns]
+        if not columns:
+            continue
+        placeholders = ", ".join("?" for _ in columns)
+        column_sql = ", ".join(columns)
+        values = [row[column] for column in columns]
+        db.execute(
+            f"INSERT OR REPLACE INTO {table} ({column_sql}) VALUES ({placeholders})",
+            values,
+        )
+
+
+def build_user_data_backup(db: sqlite3.Connection) -> dict[str, Any]:
+    card_ids = {
+        row["card_id"]
+        for row in db.execute(
+            """
+            SELECT card_id FROM card_copies
+            UNION
+            SELECT card_id FROM deck_slots
+            UNION
+            SELECT card_id FROM deck_variant_slots
+            UNION
+            SELECT commander_card_id AS card_id FROM decks WHERE commander_card_id IS NOT NULL
+            UNION
+            SELECT commander_card_id AS card_id FROM deck_variants WHERE commander_card_id IS NOT NULL
+            """
+        ).fetchall()
+        if row["card_id"] is not None
+    }
+    card_rows: list[dict[str, Any]] = []
+    tag_rows: list[dict[str, Any]] = []
+    if card_ids:
+        placeholders = ", ".join("?" for _ in card_ids)
+        card_rows = rows_as_dicts(
+            db.execute(f"SELECT * FROM cards WHERE id IN ({placeholders}) ORDER BY id", tuple(card_ids)).fetchall()
+        )
+        tag_rows = rows_as_dicts(
+            db.execute(f"SELECT * FROM card_tags WHERE card_id IN ({placeholders}) ORDER BY card_id", tuple(card_ids)).fetchall()
+        )
+    return {
+        "kind": "manavault-userdata-backup",
+        "version": 1,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "cards": card_rows,
+        "card_tags": tag_rows,
+        "locations": rows_as_dicts(db.execute("SELECT * FROM locations ORDER BY id").fetchall()),
+        "decks": rows_as_dicts(db.execute("SELECT * FROM decks ORDER BY id").fetchall()),
+        "card_copies": rows_as_dicts(db.execute("SELECT * FROM card_copies ORDER BY id").fetchall()),
+        "deck_slots": rows_as_dicts(db.execute("SELECT * FROM deck_slots ORDER BY id").fetchall()),
+        "deck_variants": rows_as_dicts(db.execute("SELECT * FROM deck_variants ORDER BY id").fetchall()),
+        "deck_variant_slots": rows_as_dicts(db.execute("SELECT * FROM deck_variant_slots ORDER BY id").fetchall()),
+        "copy_history": rows_as_dicts(db.execute("SELECT * FROM copy_history ORDER BY id").fetchall()),
+    }
+
+
+def restore_user_data_backup(payload: dict[str, Any]) -> dict[str, int]:
+    if payload.get("kind") != "manavault-userdata-backup" or payload.get("version") != 1:
+        raise HTTPException(status_code=400, detail="Diese Datei ist kein ManaVault-Datenbackup.")
+    expected_lists = ["cards", "card_tags", "locations", "decks", "card_copies", "deck_slots"]
+    for key in expected_lists:
+        if not isinstance(payload.get(key), list):
+            raise HTTPException(status_code=400, detail="Datenbackup ist unvollstaendig.")
+    history_rows = payload.get("copy_history", [])
+    if not isinstance(history_rows, list):
+        raise HTTPException(status_code=400, detail="Historie im Datenbackup ist ungueltig.")
+    for key in ("deck_variants", "deck_variant_slots"):
+        if not isinstance(payload.get(key, []), list):
+            raise HTTPException(status_code=400, detail="Variantendaten im Datenbackup sind ungueltig.")
+    if DB_PATH.exists():
+        checkpoint_database()
+        create_database_backup("manavault-before-data-import")
+    with get_db() as db:
+        db.executescript(
+            """
+            DELETE FROM deck_slots;
+            DELETE FROM deck_variant_slots;
+            DELETE FROM deck_variants;
+            DELETE FROM card_copies;
+            DELETE FROM decks;
+            DELETE FROM locations;
+            DELETE FROM card_tags;
+            DELETE FROM cards;
+            """
+        )
+        insert_backup_rows(db, "cards", payload["cards"])
+        insert_backup_rows(db, "card_tags", payload["card_tags"])
+        insert_backup_rows(db, "locations", payload["locations"])
+        insert_backup_rows(db, "decks", payload["decks"])
+        insert_backup_rows(db, "card_copies", payload["card_copies"])
+        insert_backup_rows(db, "deck_slots", payload["deck_slots"])
+        insert_backup_rows(db, "deck_variants", payload.get("deck_variants", []))
+        insert_backup_rows(db, "deck_variant_slots", payload.get("deck_variant_slots", []))
+        db.execute("DELETE FROM copy_history")
+        insert_backup_rows(db, "copy_history", history_rows)
+        db.commit()
+    init_db()
+    return {
+        **{key: len(payload[key]) for key in expected_lists},
+        "deck_variants": len(payload.get("deck_variants", [])),
+        "deck_variant_slots": len(payload.get("deck_variant_slots", [])),
+        "copy_history": len(history_rows),
+    }
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     with get_db() as db:
@@ -226,7 +406,9 @@ def init_db() -> None:
                 collector_number TEXT,
                 rarity TEXT,
                 image_url TEXT,
-                prices_json TEXT
+                prices_json TEXT,
+                layout TEXT,
+                is_token INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS locations (
@@ -240,7 +422,8 @@ def init_db() -> None:
                 name TEXT NOT NULL,
                 format TEXT,
                 commander_card_id INTEGER REFERENCES cards(id) ON DELETE SET NULL,
-                notes TEXT
+                notes TEXT,
+                public_share_token TEXT
             );
 
             CREATE TABLE IF NOT EXISTS card_copies (
@@ -255,6 +438,18 @@ def init_db() -> None:
                 note TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS copy_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                copy_id INTEGER,
+                card_id INTEGER NOT NULL,
+                card_name TEXT NOT NULL,
+                action TEXT NOT NULL,
+                from_name TEXT,
+                to_name TEXT,
+                is_proxy INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
             CREATE TABLE IF NOT EXISTS deck_slots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
@@ -262,7 +457,37 @@ def init_db() -> None:
                 quantity INTEGER NOT NULL DEFAULT 1,
                 allow_proxy INTEGER NOT NULL DEFAULT 1,
                 note TEXT,
-                UNIQUE(deck_id, card_id)
+                zone TEXT NOT NULL DEFAULT 'mainboard',
+                UNIQUE(deck_id, card_id, zone)
+            );
+
+            CREATE TABLE IF NOT EXISTS deck_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                commander_card_id INTEGER REFERENCES cards(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE(deck_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS deck_variant_slots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                variant_id INTEGER NOT NULL REFERENCES deck_variants(id) ON DELETE CASCADE,
+                card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                allow_proxy INTEGER NOT NULL DEFAULT 1,
+                note TEXT,
+                zone TEXT NOT NULL DEFAULT 'mainboard',
+                UNIQUE(variant_id, card_id, zone)
+            );
+
+            CREATE TABLE IF NOT EXISTS deck_edit_sessions (
+                deck_id INTEGER PRIMARY KEY REFERENCES decks(id) ON DELETE CASCADE,
+                base_variant_id INTEGER,
+                baseline_slots_json TEXT NOT NULL,
+                baseline_commander_card_id INTEGER,
+                started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             );
 
             CREATE TABLE IF NOT EXISTS card_tags (
@@ -270,6 +495,14 @@ def init_db() -> None:
                 auto_tags TEXT NOT NULL DEFAULT '[]',
                 manual_tags TEXT NOT NULL DEFAULT '[]',
                 rejected_auto_tags TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS card_token_links (
+                source_scryfall_id TEXT NOT NULL,
+                token_scryfall_id TEXT NOT NULL,
+                token_name TEXT NOT NULL,
+                token_type_line TEXT,
+                PRIMARY KEY (source_scryfall_id, token_scryfall_id)
             );
 
             CREATE TABLE IF NOT EXISTS app_meta (
@@ -280,11 +513,85 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name);
             CREATE INDEX IF NOT EXISTS idx_cards_printed_name ON cards(printed_name);
             CREATE INDEX IF NOT EXISTS idx_cards_lang ON cards(lang);
+            CREATE INDEX IF NOT EXISTS idx_cards_lang_set_collector ON cards(lang, set_code, collector_number);
+            CREATE INDEX IF NOT EXISTS idx_cards_oracle_lang_set ON cards(oracle_id, lang, set_code);
+            CREATE INDEX IF NOT EXISTS idx_cards_lang_name_set ON cards(lang, name, set_code);
             CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity);
             CREATE INDEX IF NOT EXISTS idx_cards_oracle_id ON cards(oracle_id);
             CREATE INDEX IF NOT EXISTS idx_copies_card ON card_copies(card_id);
             CREATE INDEX IF NOT EXISTS idx_copies_deck ON card_copies(assigned_deck_id);
+            CREATE INDEX IF NOT EXISTS idx_copy_history_created ON copy_history(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_copy_history_card ON copy_history(card_id);
             CREATE INDEX IF NOT EXISTS idx_slots_deck ON deck_slots(deck_id);
+            CREATE INDEX IF NOT EXISTS idx_variants_deck ON deck_variants(deck_id);
+            CREATE INDEX IF NOT EXISTS idx_variant_slots_variant ON deck_variant_slots(variant_id);
+            CREATE INDEX IF NOT EXISTS idx_card_token_links_source ON card_token_links(source_scryfall_id);
+            CREATE INDEX IF NOT EXISTS idx_card_token_links_token ON card_token_links(token_scryfall_id);
+
+            CREATE TRIGGER IF NOT EXISTS history_copy_insert
+            AFTER INSERT ON card_copies
+            BEGIN
+                INSERT INTO copy_history (copy_id, card_id, card_name, action, to_name, is_proxy)
+                VALUES (
+                    NEW.id,
+                    NEW.card_id,
+                    (SELECT COALESCE(printed_name, name) FROM cards WHERE id = NEW.card_id),
+                    CASE WHEN NEW.assigned_deck_id IS NOT NULL THEN 'deck_added' ELSE 'added' END,
+                    CASE
+                        WHEN NEW.assigned_deck_id IS NOT NULL THEN (SELECT name FROM decks WHERE id = NEW.assigned_deck_id)
+                        WHEN NEW.location_id IS NOT NULL THEN (SELECT name FROM locations WHERE id = NEW.location_id)
+                        ELSE 'Sammlung'
+                    END,
+                    NEW.is_proxy
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS history_copy_move
+            AFTER UPDATE OF location_id, assigned_deck_id ON card_copies
+            WHEN OLD.location_id IS NOT NEW.location_id OR OLD.assigned_deck_id IS NOT NEW.assigned_deck_id
+            BEGIN
+                INSERT INTO copy_history (copy_id, card_id, card_name, action, from_name, to_name, is_proxy)
+                VALUES (
+                    NEW.id,
+                    NEW.card_id,
+                    (SELECT COALESCE(printed_name, name) FROM cards WHERE id = NEW.card_id),
+                    CASE
+                        WHEN OLD.assigned_deck_id IS NULL AND NEW.assigned_deck_id IS NOT NULL THEN 'deck_added'
+                        WHEN OLD.assigned_deck_id IS NOT NULL AND NEW.assigned_deck_id IS NULL THEN 'deck_removed'
+                        WHEN OLD.assigned_deck_id IS NOT NEW.assigned_deck_id THEN 'deck_moved'
+                        ELSE 'moved'
+                    END,
+                    CASE
+                        WHEN OLD.assigned_deck_id IS NOT NULL THEN (SELECT name FROM decks WHERE id = OLD.assigned_deck_id)
+                        WHEN OLD.location_id IS NOT NULL THEN (SELECT name FROM locations WHERE id = OLD.location_id)
+                        ELSE 'Sammlung'
+                    END,
+                    CASE
+                        WHEN NEW.assigned_deck_id IS NOT NULL THEN (SELECT name FROM decks WHERE id = NEW.assigned_deck_id)
+                        WHEN NEW.location_id IS NOT NULL THEN (SELECT name FROM locations WHERE id = NEW.location_id)
+                        ELSE 'Sammlung'
+                    END,
+                    NEW.is_proxy
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS history_copy_delete
+            BEFORE DELETE ON card_copies
+            BEGIN
+                INSERT INTO copy_history (copy_id, card_id, card_name, action, from_name, is_proxy)
+                VALUES (
+                    OLD.id,
+                    OLD.card_id,
+                    (SELECT COALESCE(printed_name, name) FROM cards WHERE id = OLD.card_id),
+                    'deleted',
+                    CASE
+                        WHEN OLD.assigned_deck_id IS NOT NULL THEN (SELECT name FROM decks WHERE id = OLD.assigned_deck_id)
+                        WHEN OLD.location_id IS NOT NULL THEN (SELECT name FROM locations WHERE id = OLD.location_id)
+                        ELSE 'Sammlung'
+                    END,
+                    OLD.is_proxy
+                );
+            END;
             """
         )
         existing_columns = {
@@ -295,9 +602,67 @@ def init_db() -> None:
             ("printed_name", "TEXT"),
             ("printed_type_line", "TEXT"),
             ("printed_text", "TEXT"),
+            ("layout", "TEXT"),
+            ("is_token", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             if column_name not in existing_columns:
                 db.execute(f"ALTER TABLE cards ADD COLUMN {column_name} {column_type}")
+        if "is_token" not in existing_columns:
+            db.execute(
+                """
+                UPDATE cards
+                SET is_token = CASE
+                    WHEN lower(COALESCE(layout, '')) IN ('token', 'double_faced_token', 'emblem') THEN 1
+                    WHEN lower(COALESCE(type_line, '')) LIKE 'token %' THEN 1
+                    WHEN lower(COALESCE(type_line, '')) = 'emblem' THEN 1
+                    WHEN lower(COALESCE(type_line, '')) LIKE 'emblem %' THEN 1
+                    ELSE 0
+                END
+                """
+            )
+        db.execute("CREATE INDEX IF NOT EXISTS idx_cards_is_token ON cards(is_token)")
+        deck_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(decks)").fetchall()
+        }
+        if "public_share_token" not in deck_columns:
+            db.execute("ALTER TABLE decks ADD COLUMN public_share_token TEXT")
+        if "active_variant_id" not in deck_columns:
+            db.execute("ALTER TABLE decks ADD COLUMN active_variant_id INTEGER")
+        variant_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(deck_variants)").fetchall()
+        }
+        if "commander_card_id" not in variant_columns:
+            db.execute("ALTER TABLE deck_variants ADD COLUMN commander_card_id INTEGER REFERENCES cards(id) ON DELETE SET NULL")
+        slot_columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(deck_slots)").fetchall()
+        }
+        if "zone" not in slot_columns:
+            db.executescript(
+                """
+                CREATE TABLE deck_slots_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+                    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    allow_proxy INTEGER NOT NULL DEFAULT 1,
+                    note TEXT,
+                    zone TEXT NOT NULL DEFAULT 'mainboard',
+                    UNIQUE(deck_id, card_id, zone)
+                );
+                INSERT INTO deck_slots_migrated (id, deck_id, card_id, quantity, allow_proxy, note, zone)
+                SELECT id, deck_id, card_id, quantity, allow_proxy, note, 'mainboard' FROM deck_slots;
+                DROP TABLE deck_slots;
+                ALTER TABLE deck_slots_migrated RENAME TO deck_slots;
+                CREATE INDEX IF NOT EXISTS idx_slots_deck ON deck_slots(deck_id);
+                """
+            )
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_decks_public_share_token "
+            "ON decks(public_share_token) WHERE public_share_token IS NOT NULL"
+        )
         location_count = db.execute("SELECT COUNT(*) AS count FROM locations").fetchone()["count"]
         seeded_defaults = db.execute(
             "SELECT value FROM app_meta WHERE key = 'default_locations_seeded'"
@@ -346,12 +711,14 @@ def json_dump(value: Any) -> str:
     return json.dumps(value if value is not None else [], ensure_ascii=False)
 
 
-def json_load(value: str | None, fallback: Any) -> Any:
+def json_load(value: Any, fallback: Any) -> Any:
     if not value:
         return fallback
+    if isinstance(value, (dict, list)):
+        return value
     try:
         return json.loads(value)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
         return fallback
 
 
@@ -448,35 +815,93 @@ def card_price_eur_with_fallback(db: sqlite3.Connection, card: dict[str, Any]) -
     own_price = card_price_eur(json_load(card.get("prices_json"), {}))
     if own_price > 0:
         return own_price, "own"
+
+    priced_where = """
+      AND (
+        CAST(NULLIF(json_extract(prices_json, '$.eur'), '') AS REAL) > 0
+        OR CAST(NULLIF(json_extract(prices_json, '$.eur_foil'), '') AS REAL) > 0
+      )
+    """
+
+    def first_price(sql: str, params: tuple[Any, ...], source: str) -> tuple[float, str] | None:
+        row = db.execute(sql, params).fetchone()
+        if not row:
+            return None
+        price = card_price_eur(json_load(row["prices_json"], {}))
+        return (price, source) if price > 0 else None
+
+    set_code = str(card.get("set_code") or "").strip()
+    collector_number = str(card.get("collector_number") or "").strip()
+    if set_code and collector_number:
+        result = first_price(
+            f"""
+            SELECT prices_json
+            FROM cards
+            WHERE lang = 'en'
+              AND set_code = ?
+              AND collector_number = ?
+              {priced_where}
+            ORDER BY released_at DESC
+            LIMIT 1
+            """,
+            (set_code.lower(), collector_number),
+            "english_same_printing",
+        )
+        if result:
+            return result
+
     oracle_id = card.get("oracle_id")
-    if not oracle_id:
-        return 0.0, "missing"
-    same_set = db.execute(
-        """
-        SELECT prices_json
-        FROM cards
-        WHERE oracle_id = ? AND lang = 'en' AND lower(set_code) = lower(?)
-        ORDER BY released_at DESC
-        """,
-        (oracle_id, card.get("set_code") or ""),
-    ).fetchall()
-    for row in same_set:
-        price = card_price_eur(json_load(row["prices_json"], {}))
-        if price > 0:
-            return price, "english_same_set"
-    english_prints = db.execute(
-        """
-        SELECT prices_json
-        FROM cards
-        WHERE oracle_id = ? AND lang = 'en'
-        ORDER BY released_at DESC
-        """,
-        (oracle_id,),
-    ).fetchall()
-    for row in english_prints:
-        price = card_price_eur(json_load(row["prices_json"], {}))
-        if price > 0:
-            return price, "english_oracle"
+    if oracle_id:
+        result = first_price(
+            f"""
+            SELECT prices_json
+            FROM cards
+            WHERE oracle_id = ?
+              AND lang = 'en'
+              AND set_code = ?
+              {priced_where}
+            ORDER BY released_at DESC
+            LIMIT 1
+            """,
+            (oracle_id, set_code.lower()),
+            "english_same_set",
+        )
+        if result:
+            return result
+        result = first_price(
+            f"""
+            SELECT prices_json
+            FROM cards
+            WHERE oracle_id = ? AND lang = 'en'
+              {priced_where}
+            ORDER BY released_at DESC
+            LIMIT 1
+            """,
+            (oracle_id,),
+            "english_oracle",
+        )
+        if result:
+            return result
+
+    english_name = str(card.get("name") or "").strip()
+    if english_name:
+        result = first_price(
+            f"""
+            SELECT prices_json
+            FROM cards
+            WHERE lang = 'en'
+              AND name = ?
+              {priced_where}
+            ORDER BY
+              CASE WHEN set_code = ? THEN 0 ELSE 1 END,
+              released_at DESC
+            LIMIT 1
+            """,
+            (english_name, set_code.lower()),
+            "english_name",
+        )
+        if result:
+            return result
     return 0.0, "missing"
 
 
@@ -548,6 +973,44 @@ def card_collection_counts(db: sqlite3.Connection, card_id: int) -> dict[str, in
     return {key: int(row[key] or 0) for key in row.keys()}
 
 
+def card_collection_counts_bulk(db: sqlite3.Connection, card_ids: list[int]) -> dict[int, dict[str, int]]:
+    if not card_ids:
+        return {}
+    placeholders = ",".join("?" for _ in card_ids)
+    rows = db.execute(
+        f"""
+        SELECT card_id,
+               COUNT(*) AS total_count,
+               COALESCE(SUM(CASE WHEN is_proxy = 0 THEN 1 ELSE 0 END), 0) AS owned_count,
+               COALESCE(SUM(CASE WHEN is_proxy = 1 THEN 1 ELSE 0 END), 0) AS proxy_count,
+               COALESCE(SUM(CASE WHEN assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_count,
+               COALESCE(SUM(CASE WHEN is_proxy = 0 AND assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_original_count,
+               COALESCE(SUM(CASE WHEN is_proxy = 1 AND assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_proxy_count,
+               COALESCE(SUM(CASE WHEN assigned_deck_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS deck_count
+        FROM card_copies
+        WHERE card_id IN ({placeholders})
+        GROUP BY card_id
+        """,
+        card_ids,
+    ).fetchall()
+    empty = {
+        "total_count": 0,
+        "owned_count": 0,
+        "proxy_count": 0,
+        "free_count": 0,
+        "free_original_count": 0,
+        "free_proxy_count": 0,
+        "deck_count": 0,
+    }
+    result = {card_id: dict(empty) for card_id in card_ids}
+    for row in rows:
+        result[int(row["card_id"])] = {
+            key: int(row[key] or 0)
+            for key in empty
+        }
+    return result
+
+
 def planned_rows_for_card(db: sqlite3.Connection, card_id: int) -> list[dict[str, Any]]:
     free_row = db.execute(
         """
@@ -609,13 +1072,26 @@ def card_identity(card: dict[str, Any]) -> tuple[str, str, str]:
     return image_url, mana_cost, oracle_text
 
 
+def scryfall_card_is_token(card: dict[str, Any]) -> bool:
+    layout = str(card.get("layout") or "").lower()
+    type_line = str(card.get("type_line") or "").lower()
+    return (
+        layout in {"token", "double_faced_token", "emblem"}
+        or type_line.startswith("token ")
+        or type_line == "emblem"
+        or type_line.startswith("emblem ")
+    )
+
+
 def upsert_cards(db: sqlite3.Connection, cards: list[dict[str, Any]]) -> int:
     rows = []
     tag_sources = []
+    token_links: list[tuple[str, str, str, str | None]] = []
     for card in cards:
         if card.get("object") != "card" or not card.get("id") or not card.get("name"):
             continue
         image_url, mana_cost, oracle_text = card_identity(card)
+        card_is_token = scryfall_card_is_token(card)
         rows.append(
             (
                 card.get("id"),
@@ -642,17 +1118,40 @@ def upsert_cards(db: sqlite3.Connection, cards: list[dict[str, Any]]) -> int:
                 card.get("rarity"),
                 image_url,
                 json.dumps(card.get("prices") or {}, ensure_ascii=False),
+                card.get("layout"),
+                int(card_is_token),
             )
         )
         tag_sources.append((card.get("id"), card.get("type_line"), oracle_text))
+        related_parts = [part for part in (card.get("all_parts") or []) if part.get("object") == "related_card"]
+        if card_is_token:
+            for part in related_parts:
+                if part.get("component") != "combo_piece" or not part.get("id"):
+                    continue
+                token_links.append((
+                    str(part["id"]),
+                    str(card["id"]),
+                    str(card.get("name") or "Token"),
+                    card.get("type_line"),
+                ))
+        else:
+            for part in related_parts:
+                if part.get("component") != "token" or not part.get("id"):
+                    continue
+                token_links.append((
+                    str(card["id"]),
+                    str(part["id"]),
+                    str(part.get("name") or "Token"),
+                    part.get("type_line"),
+                ))
     db.executemany(
         """
         INSERT INTO cards (
             scryfall_id, oracle_id, name, printed_name, lang, released_at, mana_cost, cmc,
             type_line, printed_type_line, oracle_text, printed_text, power, toughness, loyalty, colors,
             color_identity, legalities, set_code, set_name, collector_number,
-            rarity, image_url, prices_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rarity, image_url, prices_json, layout, is_token
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scryfall_id) DO UPDATE SET
             oracle_id=excluded.oracle_id,
             name=excluded.name,
@@ -676,10 +1175,23 @@ def upsert_cards(db: sqlite3.Connection, cards: list[dict[str, Any]]) -> int:
             collector_number=excluded.collector_number,
             rarity=excluded.rarity,
             image_url=excluded.image_url,
-            prices_json=excluded.prices_json
+            prices_json=excluded.prices_json,
+            layout=excluded.layout,
+            is_token=excluded.is_token
         """,
         rows,
     )
+    if token_links:
+        db.executemany(
+            """
+            INSERT INTO card_token_links (source_scryfall_id, token_scryfall_id, token_name, token_type_line)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_scryfall_id, token_scryfall_id) DO UPDATE SET
+                token_name=excluded.token_name,
+                token_type_line=excluded.token_type_line
+            """,
+            token_links,
+        )
     if tag_sources:
         id_to_card = {}
         for start in range(0, len(tag_sources), 500):
@@ -708,6 +1220,47 @@ def request_json(url: str) -> Any:
     )
     with urllib.request.urlopen(req, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def import_scryfall_tokens(db: sqlite3.Connection) -> int:
+    """Import all separately listed token, double-faced-token and emblem printings."""
+    imported = 0
+    page = 0
+    next_url: str | None = SCRYFALL_TOKEN_SEARCH_URL
+    while next_url:
+        page += 1
+        set_scryfall_import_status(
+            phase="tokens",
+            message=f"Scryfall Tokens und Embleme werden importiert (Seite {page}).",
+            imported=imported,
+        )
+        result = request_json(next_url)
+        cards = result.get("data") or []
+        imported += upsert_cards(db, cards)
+        db.commit()
+        next_url = result.get("next_page") if result.get("has_more") else None
+        if next_url:
+            time.sleep(0.1)
+    expand_token_links_across_printings(db)
+    db.commit()
+    return imported
+
+
+def expand_token_links_across_printings(db: sqlite3.Connection) -> int:
+    cursor = db.execute(
+        """
+        INSERT OR IGNORE INTO card_token_links (
+            source_scryfall_id, token_scryfall_id, token_name, token_type_line
+        )
+        SELECT sibling.scryfall_id, link.token_scryfall_id, link.token_name, link.token_type_line
+        FROM card_token_links link
+        JOIN cards linked_source ON linked_source.scryfall_id = link.source_scryfall_id
+        JOIN cards sibling ON sibling.oracle_id = linked_source.oracle_id
+                          AND COALESCE(sibling.is_token, 0) = 0
+        WHERE linked_source.oracle_id IS NOT NULL
+        """
+    )
+    return max(0, int(cursor.rowcount or 0))
 
 
 def download_file(url: str, target: Path) -> None:
@@ -787,9 +1340,24 @@ def import_scryfall_data(
     local_file: str | None = None,
     limit: int | None = None,
     bulk_type: str | None = None,
+    tokens_only: bool = False,
 ) -> dict[str, Any]:
     set_scryfall_import_status(phase="prepare", message="Import wird vorbereitet.", error=None)
     init_db()
+    if tokens_only:
+        with get_db() as db:
+            tokens_imported = import_scryfall_tokens(db)
+        set_scryfall_import_status(
+            phase="done",
+            message=f"{tokens_imported} Tokens und Embleme importiert.",
+            imported=tokens_imported,
+        )
+        return {
+            "imported": tokens_imported,
+            "cards_imported": 0,
+            "tokens_imported": tokens_imported,
+            "source": "Scryfall Kartensuche (Tokens und Embleme)",
+        }
     if local_file:
         source = Path(local_file)
         if not source.exists():
@@ -833,13 +1401,108 @@ def import_scryfall_data(
             )
             imported += upsert_cards(db, batch)
             db.commit()
-    set_scryfall_import_status(phase="done", message=f"{imported} Karten importiert.", imported=imported)
-    return {"imported": imported, "source": str(source)}
+    tokens_imported = 0
+    if limit is None:
+        with get_db() as db:
+            tokens_imported = import_scryfall_tokens(db)
+    total_imported = imported + tokens_imported
+    set_scryfall_import_status(
+        phase="done",
+        message=f"{imported} Karten und {tokens_imported} Tokens/Embleme importiert.",
+        imported=total_imported,
+    )
+    return {
+        "imported": total_imported,
+        "cards_imported": imported,
+        "tokens_imported": tokens_imported,
+        "source": str(source),
+    }
 
 
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
+
+
+@app.get("/deck/{deck_id}")
+def public_deck_page(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> FileResponse:
+    if not db.execute("SELECT id FROM decks WHERE id = ?", (deck_id,)).fetchone():
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    return FileResponse(FRONTEND_DIR / "index.html")
+
+
+def configured_public_base_url() -> str | None:
+    configured = os.environ.get("MANAVAULT_PUBLIC_URL", "").strip()
+    if not configured and PUBLIC_URL_FILE.exists():
+        configured = PUBLIC_URL_FILE.read_text(encoding="utf-8").strip()
+    if not configured:
+        return None
+    parsed = urllib.parse.urlparse(configured)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    return configured.rstrip("/")
+
+
+def ensure_deck_share_token(deck_id: int, db: sqlite3.Connection) -> tuple[sqlite3.Row, str]:
+    deck = db.execute(
+        "SELECT id, name, public_share_token FROM decks WHERE id = ?",
+        (deck_id,),
+    ).fetchone()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    token = str(deck["public_share_token"] or "").strip()
+    if not token:
+        token = secrets.token_urlsafe(24)
+        db.execute("UPDATE decks SET public_share_token = ? WHERE id = ?", (token, deck_id))
+        db.commit()
+    return deck, token
+
+
+@app.post("/api/decks/{deck_id}/share")
+def create_deck_share(
+    deck_id: int,
+    request: Request,
+    db: sqlite3.Connection = Depends(db_dep),
+) -> dict[str, Any]:
+    deck, token = ensure_deck_share_token(deck_id, db)
+    base_url = configured_public_base_url()
+    if not base_url:
+        raise HTTPException(
+            status_code=409,
+            detail="Oeffentliche Adresse noch nicht eingerichtet.",
+        )
+    return {
+        "deck_id": deck_id,
+        "name": deck["name"],
+        "token": token,
+        "url": f"{base_url}/share/{token}",
+    }
+
+
+@app.post("/api/decks/{deck_id}/share/rotate")
+def rotate_deck_share(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    if not db.execute("SELECT id FROM decks WHERE id = ?", (deck_id,)).fetchone():
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    token = secrets.token_urlsafe(24)
+    db.execute("UPDATE decks SET public_share_token = ? WHERE id = ?", (token, deck_id))
+    db.commit()
+    base_url = configured_public_base_url()
+    return {"token": token, "url": f"{base_url}/share/{token}" if base_url else None}
+
+
+@app.delete("/api/decks/{deck_id}/share")
+def revoke_deck_share(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, bool]:
+    cur = db.execute("UPDATE decks SET public_share_token = NULL WHERE id = ?", (deck_id,))
+    db.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    return {"revoked": True}
+
+
+@app.get("/api/version")
+def app_version() -> dict[str, str]:
+    version = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else app.version
+    return {"version": version}
 
 
 @app.get("/api/backups/download")
@@ -852,6 +1515,33 @@ def download_backup() -> FileResponse:
         media_type="application/vnd.sqlite3",
         filename=backup_path.name,
     )
+
+
+@app.get("/api/backups/user-data")
+def download_user_data_backup(db: sqlite3.Connection = Depends(db_dep)) -> Response:
+    payload = build_user_data_backup(db)
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    filename = f"manavault-daten-{backup_timestamp()}.json"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/backups/user-data/import")
+async def import_user_data_backup(request: Request) -> dict[str, Any]:
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Keine Backup-Datei empfangen.")
+    if len(body) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Datenbackup ist groesser als 100 MB.")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=400, detail="Datenbackup konnte nicht gelesen werden.") from error
+    counts = restore_user_data_backup(payload)
+    return {"status": "ok", "message": "Datenbackup importiert.", "counts": counts}
 
 
 @app.post("/api/backups/import")
@@ -903,47 +1593,866 @@ def search_cards(
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     safe_limit = max(1, min(limit, 1000))
     safe_offset = max(0, offset)
-    params.extend([safe_limit, safe_offset])
     rows = db.execute(
         f"""
-        SELECT c.*,
-               COUNT(cc.id) AS total_count,
-               COALESCE(SUM(CASE WHEN cc.is_proxy = 0 THEN 1 ELSE 0 END), 0) AS owned_count,
-               COALESCE(SUM(CASE WHEN cc.is_proxy = 1 THEN 1 ELSE 0 END), 0) AS proxy_count,
-               COALESCE(SUM(CASE WHEN cc.assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_count,
-               COALESCE(SUM(CASE WHEN cc.is_proxy = 0 AND cc.assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_original_count,
-               COALESCE(SUM(CASE WHEN cc.is_proxy = 1 AND cc.assigned_deck_id IS NULL THEN 1 ELSE 0 END), 0) AS free_proxy_count,
-               COALESCE(SUM(CASE WHEN cc.assigned_deck_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS deck_count
+        SELECT c.*
         FROM cards c
-        LEFT JOIN card_copies cc ON cc.card_id = c.id
         {where}
-        GROUP BY c.id
         ORDER BY {order}
         LIMIT ? OFFSET ?
         """,
-        params,
+        [*params, safe_limit, safe_offset],
     ).fetchall()
+    counts_by_card = card_collection_counts_bulk(db, [int(row["id"]) for row in rows])
     result = []
     for row in rows:
         card = card_row(row)
-        price_eur, price_source = card_price_eur_with_fallback(db, card)
-        card["price_eur"] = price_eur
-        card["price_source"] = price_source
+        card.update(counts_by_card.get(int(row["id"]), {}))
+        card["price_source"] = "own" if card.get("price_eur", 0) > 0 else "missing"
         if min_price_eur is not None and card.get("price_eur", 0) < min_price_eur:
             continue
-        tags = readonly_card_tags(db, row["id"], row["type_line"], row["oracle_text"])
-        card["tags"] = tags["tags"]
+        card["tags"] = []
         result.append(card)
     return result
 
 
+def normalized_card_name(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def scanner_card_matches(db: sqlite3.Connection, raw_text: str, limit: int = 8) -> tuple[str, list[dict[str, Any]]]:
+    lines = [re.sub(r"\s+", " ", line).strip(" ._|[]{}") for line in raw_text.splitlines()]
+    lines = [line for line in lines if 2 < len(line) < 70 and re.search(r"[A-Za-zÀ-ž]", line)]
+    if not lines:
+        return "", []
+    query = lines[0]
+    normalized_query = normalized_card_name(query)
+    token = max(normalized_query.split(), key=len, default="")
+    params: list[Any] = []
+    where = "WHERE c.lang IN ('en', 'de')"
+    if len(token) >= 3:
+        where += " AND (LOWER(c.name) LIKE ? OR LOWER(COALESCE(c.printed_name, '')) LIKE ?)"
+        params = [f"%{token}%", f"%{token}%"]
+    rows = db.execute(
+        f"""
+        SELECT c.* FROM cards c
+        {where}
+        ORDER BY ABS(LENGTH(COALESCE(c.printed_name, c.name)) - ?) ASC,
+                 COALESCE(c.printed_name, c.name), c.released_at DESC
+        LIMIT 5000
+        """,
+        [*params, len(query)],
+    ).fetchall()
+    if not rows and token:
+        rows = db.execute("SELECT c.* FROM cards c WHERE c.lang IN ('en', 'de') ORDER BY c.name LIMIT 50000").fetchall()
+    scored = []
+    for row in rows:
+        names = [row["name"], row["printed_name"] or ""]
+        score = max(SequenceMatcher(None, normalized_query, normalized_card_name(name)).ratio() for name in names if name)
+        if score >= 0.74:
+            scored.append((score, row))
+    scored.sort(key=lambda item: item[1]["released_at"] or "", reverse=True)
+    scored.sort(key=lambda item: (-item[0], item[1]["name"]))
+    result = []
+    seen: set[int] = set()
+    for score, row in scored:
+        card_id = int(row["id"])
+        if card_id in seen:
+            continue
+        seen.add(card_id)
+        card = card_row(row)
+        card.update(card_collection_counts(db, card_id))
+        card["scanner_score"] = round(score, 3)
+        result.append(card)
+        if len(result) >= limit:
+            break
+    return query, result
+
+
+def normalized_collector_number(value: str) -> str:
+    value = re.sub(r"[^0-9A-Za-z]", "", value or "").upper()
+    match = re.fullmatch(r"0*([0-9]+)([A-Z]*)", value)
+    return f"{int(match.group(1))}{match.group(2)}" if match else value
+
+
+def scanner_print_matches(db: sqlite3.Connection, raw_text: str, limit: int = 8) -> tuple[str, list[dict[str, Any]]]:
+    clean = re.sub(r"[^A-Z0-9/]+", " ", (raw_text or "").upper()).strip()
+    tokens = clean.split()
+    if not tokens:
+        return clean, []
+    known_sets = {str(row["set_code"]).upper() for row in db.execute("SELECT DISTINCT set_code FROM cards WHERE set_code IS NOT NULL")}
+    set_codes = [token for token in tokens if token in known_sets]
+    for token in tokens:
+        if len(token) > 3 and token[-2:] in {"DE", "EN"} and token[:-2] in known_sets:
+            set_codes.append(token[:-2])
+    for token in list(set_codes):
+        for index, char in enumerate(token):
+            if char not in {"A", "E"}:
+                continue
+            alternative = f"{token[:index]}{'E' if char == 'A' else 'A'}{token[index + 1:]}"
+            if alternative in known_sets and alternative not in set_codes:
+                set_codes.append(alternative)
+    if not set_codes:
+        for token in tokens:
+            if not 2 <= len(token) <= 6:
+                continue
+            token_as_letters = token.replace("0", "O").replace("1", "I").replace("5", "S")
+            best = max(known_sets, key=lambda code: SequenceMatcher(None, token_as_letters, code).ratio(), default="")
+            if best and SequenceMatcher(None, token_as_letters, best).ratio() >= 0.66:
+                set_codes.append(best)
+    set_codes = list(dict.fromkeys(set_codes))
+    marked_numbers = []
+    print_marker = ""
+    for marked_match in re.finditer(r"(?:^|\s)([TCURML])\s*(0*[0-9O]{2,5})(?=\s|$)", clean):
+        marked_token = f"{marked_match.group(1)}{marked_match.group(2)}"
+        if marked_token in known_sets:
+            continue
+        if not print_marker:
+            print_marker = marked_match.group(1)
+        marked_numbers.append(marked_match.group(2))
+    fraction = re.search(r"([0-9O]{1,5})\s*/\s*([0-9O]{2,5})", clean)
+    number_tokens = marked_numbers or ([fraction.group(1)] if fraction else re.findall(r"[0-9O]{1,5}[A-Z]?", clean))
+    numbers = [normalized_collector_number(token.replace("O", "0")) for token in number_tokens]
+    upper_text = (raw_text or "").upper()
+    language_hits = re.findall(r"(?:^|[^A-Z])(DE|EN)(?=$|[^A-Z])", upper_text)
+    for set_code in set_codes:
+        language_hits.extend(re.findall(rf"{re.escape(set_code)}[^A-Z0-9]{{0,3}}(DE|EN)", upper_text))
+    languages = list(dict.fromkeys(token.lower() for token in language_hits))
+    if not set_codes or not numbers:
+        return clean, []
+    result = []
+    for set_code in set_codes:
+        kind_sql = " AND c.is_token = 1" if print_marker == "T" else (" AND c.is_token = 0" if print_marker else "")
+        rows = db.execute(
+            f"SELECT c.* FROM cards c WHERE UPPER(c.set_code) = ? AND c.lang IN ('en', 'de'){kind_sql} ORDER BY c.released_at DESC",
+            (set_code,),
+        ).fetchall()
+        rows = sorted(
+            rows,
+            key=lambda row: numbers.index(normalized_collector_number(row["collector_number"] or ""))
+            if normalized_collector_number(row["collector_number"] or "") in numbers else len(numbers),
+        )
+        exact_rows = [
+            row for row in rows
+            if normalized_collector_number(row["collector_number"] or "") in numbers
+        ]
+        localized_rows = [row for row in exact_rows if not languages or row["lang"] in languages]
+        language_inferred = bool(languages and not localized_rows and exact_rows)
+        for row in localized_rows or exact_rows:
+            card = card_row(row)
+            if language_inferred:
+                # Newly released sets sometimes reach the local Scryfall dump before
+                # their localized row does.  The printed DE/EN marker is still more
+                # trustworthy than silently rejecting an otherwise exact printing.
+                card["lang"] = languages[0]
+                card["scanner_language_inferred"] = True
+            card.update(card_collection_counts(db, int(row["id"])))
+            card["scanner_score"] = 1.0
+            result.append(card)
+            if len(result) >= limit:
+                return clean, result
+    return clean, result
+
+
+def cards_matched_by_name_and_number(
+    db: sqlite3.Connection,
+    raw_name: str,
+    raw_collector: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Resolve old frames that print a collector number but no set code."""
+    normalized_name = normalized_card_name(raw_name)
+    if len(normalized_name) < 3:
+        return []
+    number_tokens = re.findall(r"(?<![0-9])([0-9O]{2,4})(?![0-9])", raw_collector.upper())
+    numbers = {
+        normalized_collector_number(token.replace("O", "0"))
+        for token in number_tokens
+        if not (1993 <= int(token.replace("O", "0")) <= 2100)
+    }
+    if not numbers:
+        return []
+    rows = db.execute(
+        "SELECT c.* FROM cards c WHERE c.lang IN ('en', 'de') AND CAST(c.collector_number AS INTEGER) IN (%s)"
+        % ",".join("?" for _ in numbers),
+        [int(number) for number in numbers if number.isdigit()],
+    ).fetchall()
+    scored: list[tuple[float, sqlite3.Row]] = []
+    for row in rows:
+        if normalized_collector_number(row["collector_number"] or "") not in numbers:
+            continue
+        score = max(
+            SequenceMatcher(None, normalized_name, normalized_card_name(name)).ratio()
+            for name in (row["name"], row["printed_name"] or "") if name
+        )
+        if score >= 0.74:
+            scored.append((score, row))
+    if not scored:
+        return []
+    best_score = max(score for score, _ in scored)
+    matches = []
+    for score, row in scored:
+        if score < best_score - 0.04:
+            continue
+        card = card_row(row)
+        card.update(card_collection_counts(db, int(row["id"])))
+        card["scanner_score"] = round(score, 3)
+        matches.append(card)
+    unique_prints = {
+        (str(card.get("set_code") or ""), str(card.get("collector_number") or ""))
+        for card in matches
+    }
+    # A number without a set is accepted only when the recognized card name makes
+    # the physical printing unique.  This prevents copyright years from guessing.
+    return matches[:limit] if len(unique_prints) == 1 else []
+
+
+def cards_matched_by_name_and_set(
+    db: sqlite3.Connection,
+    raw_name: str,
+    raw_text: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Resolve a printing when OCR has a strong name and set but damaged digits."""
+    _, name_cards = scanner_card_matches(db, raw_name, limit=120)
+    if not name_cards:
+        return []
+    upper_text = (raw_text or "").upper()
+    clean_tokens = re.sub(r"[^A-Z0-9]+", " ", upper_text).split()
+    known_sets = {str(row["set_code"]).upper() for row in db.execute("SELECT DISTINCT set_code FROM cards WHERE set_code IS NOT NULL")}
+    set_codes = {token for token in clean_tokens if token in known_sets}
+    languages = set(re.findall(r"(?:^|[^A-Z])(DE|EN)(?=$|[^A-Z])", upper_text))
+    for token in clean_tokens:
+        if len(token) > 3 and token[-2:] in {"DE", "EN"} and token[:-2] in known_sets:
+            set_codes.add(token[:-2])
+            languages.add(token[-2:])
+    if not set_codes:
+        return []
+    matches = [
+        card for card in name_cards
+        if str(card.get("set_code") or "").upper() in set_codes
+        and (not languages or str(card.get("lang") or "").upper() in languages)
+    ]
+    if not matches:
+        return []
+    best_score = max(float(card.get("scanner_score") or 0) for card in matches)
+    matches = [card for card in matches if float(card.get("scanner_score") or 0) >= best_score - 0.04]
+    unique_prints = {
+        (str(card.get("set_code") or ""), normalized_collector_number(card.get("collector_number") or ""))
+        for card in matches
+    }
+    return matches[:limit] if len(unique_prints) == 1 else []
+
+
+def decode_scanner_image(image_data: str, Image) -> Any:
+    encoded = image_data.split(",", 1)[-1]
+    if len(encoded) > 3_000_000:
+        raise HTTPException(status_code=413, detail="Kamerabild ist zu gross.")
+    try:
+        return Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))).convert("L")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Kamerabild konnte nicht gelesen werden.") from exc
+
+
+def detect_and_warp_card(image: Any) -> tuple[Any | None, float]:
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None, 0.0
+    rgb = np.array(image.convert("RGB"))
+    height, width = rgb.shape[:2]
+    scale = min(1.0, 1400 / max(width, height))
+    if scale < 1:
+        rgb = cv2.resize(rgb, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
+    height, width = rgb.shape[:2]
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    frame_area = height * width
+    candidates: dict[tuple[int, ...], tuple[float, Any]] = {}
+    # A dark card on a light/white surface is the most common scanner setup.
+    # Segmenting it directly is much less sensitive to autofocus and motion blur
+    # than relying on one perfectly closed Canny contour.
+    border = np.concatenate((gray[:20, :].ravel(), gray[-20:, :].ravel(), gray[:, :20].ravel(), gray[:, -20:].ravel()))
+    background_level = float(np.median(border))
+    if background_level >= 150:
+        for offset in (18, 32, 48):
+            cutoff = max(45, min(242, round(background_level - offset)))
+            mask = cv2.threshold(gray, cutoff, 255, cv2.THRESH_BINARY_INV)[1]
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8), iterations=2)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < frame_area * 0.018 or area > frame_area * 0.95:
+                    continue
+                rectangle = cv2.minAreaRect(contour)
+                rect_width, rect_height = rectangle[1]
+                if rect_width <= 0 or rect_height <= 0:
+                    continue
+                ratio = min(rect_width, rect_height) / max(rect_width, rect_height)
+                rectangularity = area / max(1.0, rect_width * rect_height)
+                if not 0.58 <= ratio <= 0.82 or rectangularity < 0.58:
+                    continue
+                points = cv2.boxPoints(rectangle).astype("float32")
+                sums = points.sum(axis=1)
+                diffs = np.diff(points, axis=1).ravel()
+                ordered = np.array([
+                    points[np.argmin(sums)], points[np.argmin(diffs)],
+                    points[np.argmax(sums)], points[np.argmax(diffs)],
+                ], dtype="float32")
+                ratio_score = max(0.0, 1.0 - abs(ratio - 0.716) / 0.14)
+                area_score = (rect_width * rect_height) / frame_area
+                preview_target = np.array([[0, 0], [119, 0], [119, 167], [0, 167]], dtype="float32")
+                preview_matrix = cv2.getPerspectiveTransform(ordered, preview_target)
+                preview = cv2.warpPerspective(gray, preview_matrix, (120, 168))
+                border_pixels = np.concatenate((
+                    preview[:7, :].ravel(), preview[-7:, :].ravel(),
+                    preview[:, :7].ravel(), preview[:, -7:].ravel(),
+                ))
+                border_darkness = max(0.0, min(1.0, (220.0 - float(np.mean(border_pixels))) / 180.0))
+                score = (
+                    (area_score ** 0.5)
+                    * (ratio_score ** 2)
+                    * (0.9 + 0.1 * rectangularity)
+                    * (0.5 + border_darkness)
+                    * 1.1
+                )
+                key = tuple(int(value / 8) for value in ordered.ravel())
+                if key not in candidates or score > candidates[key][0]:
+                    candidates[key] = (score, ordered)
+    for low, high in ((25, 75), (45, 135), (70, 210)):
+        edges = cv2.Canny(gray, low, high)
+        for kernel_size in (3, 7, 11):
+            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((kernel_size, kernel_size), np.uint8), iterations=1)
+            contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < frame_area * 0.025 or area > frame_area * 0.95:
+                    continue
+                perimeter = cv2.arcLength(contour, True)
+                for epsilon in (0.015, 0.025, 0.04, 0.06):
+                    polygon = cv2.approxPolyDP(contour, epsilon * perimeter, True)
+                    if len(polygon) != 4 or not cv2.isContourConvex(polygon):
+                        continue
+                    points = polygon.reshape(4, 2).astype("float32")
+                    sums = points.sum(axis=1)
+                    diffs = np.diff(points, axis=1).ravel()
+                    ordered = np.array([
+                        points[np.argmin(sums)], points[np.argmin(diffs)],
+                        points[np.argmax(sums)], points[np.argmax(diffs)],
+                    ], dtype="float32")
+                    top_left, top_right, bottom_right, bottom_left = ordered
+                    card_width = (np.linalg.norm(top_right - top_left) + np.linalg.norm(bottom_right - bottom_left)) / 2
+                    card_height = (np.linalg.norm(bottom_left - top_left) + np.linalg.norm(bottom_right - top_right)) / 2
+                    if card_width <= 0 or card_height <= 0:
+                        continue
+                    ratio = min(card_width, card_height) / max(card_width, card_height)
+                    if not 0.56 <= ratio <= 0.84:
+                        continue
+                    border_hits = sum(
+                        x < 5 or y < 5 or x > width - 6 or y > height - 6
+                        for x, y in ordered
+                    )
+                    if border_hits >= 3:
+                        continue
+                    ratio_score = max(0.0, 1.0 - abs(ratio - 0.716) / 0.16)
+                    area_score = area / frame_area
+                    score = (area_score ** 0.5) * (ratio_score ** 4)
+                    key = tuple(int(value / 8) for value in ordered.ravel())
+                    if key not in candidates or score > candidates[key][0]:
+                        candidates[key] = (score, ordered)
+    if not candidates:
+        edges = cv2.Canny(gray, 35, 130)
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8), iterations=2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            contour_area = cv2.contourArea(contour)
+            if contour_area < frame_area * 0.02 or contour_area > frame_area * 0.95:
+                continue
+            rectangle = cv2.minAreaRect(contour)
+            rect_width, rect_height = rectangle[1]
+            if rect_width <= 0 or rect_height <= 0:
+                continue
+            ratio = min(rect_width, rect_height) / max(rect_width, rect_height)
+            if not 0.56 <= ratio <= 0.84:
+                continue
+            points = cv2.boxPoints(rectangle).astype("float32")
+            sums = points.sum(axis=1)
+            diffs = np.diff(points, axis=1).ravel()
+            ordered = np.array([
+                points[np.argmin(sums)], points[np.argmin(diffs)],
+                points[np.argmax(sums)], points[np.argmax(diffs)],
+            ], dtype="float32")
+            ratio_score = max(0.0, 1.0 - abs(ratio - 0.716) / 0.16)
+            area_score = (rect_width * rect_height) / frame_area
+            score = (area_score ** 0.5) * (ratio_score ** 4) * 0.82
+            key = tuple(int(value / 8) for value in ordered.ravel())
+            candidates[key] = (score, ordered)
+    if not candidates:
+        return None, 0.0
+    score, source_points = max(candidates.values(), key=lambda item: item[0])
+    target_width, target_height = 744, 1039
+    target_points = np.array(
+        [[0, 0], [target_width - 1, 0], [target_width - 1, target_height - 1], [0, target_height - 1]],
+        dtype="float32",
+    )
+    matrix = cv2.getPerspectiveTransform(source_points, target_points)
+    warped = cv2.warpPerspective(rgb, matrix, (target_width, target_height), flags=cv2.INTER_CUBIC)
+    return Image.fromarray(warped), float(min(1.0, score / 0.38))
+
+
+def scanner_debug_data_url(image: Any) -> str:
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=88)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def rapid_ocr_lines(image: Any) -> tuple[list[str], list[float]]:
+    global RAPID_OCR_ENGINE
+    try:
+        import numpy as np
+        from rapidocr import RapidOCR
+    except ImportError:
+        return [], []
+    try:
+        with RAPID_OCR_LOCK:
+            if RAPID_OCR_ENGINE is None:
+                RAPID_OCR_ENGINE = RapidOCR()
+            output = RAPID_OCR_ENGINE(np.array(image.convert("RGB")), text_score=0.25, box_thresh=0.2)
+        texts = [str(text).strip() for text in (output.txts or []) if str(text).strip()]
+        scores = [float(score) for score in (output.scores or [])]
+        return texts, scores
+    except Exception:
+        return [], []
+
+
+def rapid_ocr_text(image: Any) -> tuple[str, float]:
+    texts, scores = rapid_ocr_lines(image)
+    return " ".join(texts).strip(), (sum(scores) / len(scores) if scores else 0.0)
+
+
+def cards_confirmed_by_name(cards: list[dict[str, Any]], raw_name: str) -> tuple[list[dict[str, Any]], float]:
+    normalized_read = normalized_card_name(raw_name)
+    if len(normalized_read) < 3:
+        return [], 0.0
+    scored: list[tuple[float, dict[str, Any]]] = []
+    unverifiable: list[dict[str, Any]] = []
+    for card in cards:
+        if card.get("lang") != "en" and not card.get("printed_name"):
+            unverifiable.append(card)
+        names = [card.get("name") or "", card.get("printed_name") or ""]
+        score = max((SequenceMatcher(None, normalized_read, normalized_card_name(name)).ratio() for name in names if name), default=0.0)
+        scored.append((score, card))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best = scored[0][0] if scored else 0.0
+    if best < 0.58:
+        if unverifiable:
+            return unverifiable, 0.72
+        return [], best
+    return [card for score, card in scored if score >= max(0.58, best - 0.06)], best
+
+
+def full_frame_card_match(db: sqlite3.Connection, image: Any) -> dict[str, Any] | None:
+    lines, line_scores = rapid_ocr_lines(image)
+    if not lines:
+        return None
+    known_sets = {str(row["set_code"]).upper() for row in db.execute("SELECT DISTINCT set_code FROM cards WHERE set_code IS NOT NULL")}
+    best_result: dict[str, Any] | None = None
+    for set_index, set_line in enumerate(lines):
+        set_tokens = re.sub(r"[^A-Z0-9]+", " ", set_line.upper()).split()
+        if not any(token in known_sets for token in set_tokens):
+            continue
+        preceding = range(max(0, set_index - 4), set_index + 1)
+        number_indexes = [
+            index for index in preceding
+            if re.search(r"(?:^|\s)[CURM]?\s*0*[0-9]{2,5}(?:\s*/\s*[0-9]{2,5})?", lines[index].upper())
+            and not re.fullmatch(r"\s*[0-9]{1,2}\s*/\s*[0-9]{1,2}\s*", lines[index])
+        ]
+        for number_index in number_indexes:
+            collector_text = f"{lines[number_index]} {set_line}"
+            _, candidates = scanner_print_matches(db, collector_text)
+            if not candidates:
+                continue
+            for name_line in lines:
+                confirmed, name_score = cards_confirmed_by_name(candidates, name_line)
+                if not confirmed:
+                    continue
+                relevant_scores = [line_scores[number_index], line_scores[set_index]]
+                collector_score = sum(relevant_scores) / len(relevant_scores)
+                combined = min(collector_score, name_score)
+                if best_result is None or combined > best_result["score"]:
+                    best_result = {
+                        "cards": confirmed,
+                        "collector_text": collector_text,
+                        "name_text": name_line,
+                        "score": combined,
+                        "all_text": " | ".join(lines),
+                    }
+    return best_result
+
+
+@app.post("/api/cards/scan-frame")
+def scan_card_frame(payload: ScannerFrameIn, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+        import pytesseract
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="Live-OCR ist auf dem Server noch nicht vollstaendig installiert.") from exc
+    try:
+        import cv2  # noqa: F401 -- required by detect_and_warp_card
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenCV fuer die Kartenkontur fehlt oder kann auf dem Linux-Server nicht geladen werden. Bitte Scanner-Abhaengigkeiten installieren.",
+        ) from exc
+    detected_card = None
+    detection_score = 0.0
+    detected_name_image = None
+    detected_collector_image = None
+    detected_collector_wide_image = None
+    full_source_image = None
+    if payload.full_image_data:
+        full_source_image = decode_scanner_image(payload.full_image_data, Image)
+        detected_card, detection_score = detect_and_warp_card(full_source_image)
+        if detected_card is None:
+            fallback = full_frame_card_match(db, full_source_image)
+            if fallback:
+                return {
+                    "recognized_text": fallback["all_text"],
+                    "collector_text": fallback["collector_text"],
+                    "query": fallback["collector_text"],
+                    "match_type": "collector",
+                    "ocr_engine": "rapidocr-full-frame",
+                    "ocr_score": round(fallback["score"], 3),
+                    "name_text": fallback["name_text"],
+                    "name_match_score": round(fallback["score"], 3),
+                    "card_detected": False,
+                    "detection_mode": "full-frame-text",
+                    "cards": fallback["cards"],
+                }
+            if payload.live:
+                return {
+                    "recognized_text": "", "collector_text": "", "query": "",
+                    "match_type": "none", "ocr_engine": "rapidocr", "ocr_score": 0.0,
+                    "card_detected": False, "cards": [],
+                }
+        else:
+            card_width, card_height = detected_card.size
+            detected_name_image = detected_card.crop((
+                round(card_width * 0.02), 0,
+                round(card_width * 0.96), round(card_height * 0.15),
+            ))
+            detected_collector_image = detected_card.crop((
+                round(card_width * 0.01), round(card_height * 0.85),
+                round(card_width * 0.60), round(card_height * 0.995),
+            ))
+            detected_collector_wide_image = detected_card.crop((
+                round(card_width * 0.01), round(card_height * 0.85),
+                round(card_width * 0.99), round(card_height * 0.995),
+            ))
+    if detected_name_image is not None and detected_collector_wide_image is not None:
+        name_rgb = detected_name_image.convert("RGB")
+        collector_rgb = detected_collector_wide_image.convert("RGB")
+        combined_image = Image.new(
+            "RGB",
+            (max(name_rgb.width, collector_rgb.width), name_rgb.height + 20 + collector_rgb.height),
+            "white",
+        )
+        combined_image.paste(name_rgb, (0, 0))
+        combined_image.paste(collector_rgb, (0, name_rgb.height + 20))
+        combined_lines, combined_scores = rapid_ocr_lines(combined_image)
+        if combined_lines:
+            combined_text = " | ".join(combined_lines)
+            combined_query, print_cards = scanner_print_matches(db, combined_text)
+            matched_cards: list[dict[str, Any]] = []
+            matched_name = ""
+            matched_name_score = 0.0
+            if print_cards:
+                for line in combined_lines:
+                    confirmed_cards, name_score = cards_confirmed_by_name(print_cards, line)
+                    if confirmed_cards and name_score > matched_name_score:
+                        matched_cards = confirmed_cards
+                        matched_name = line
+                        matched_name_score = name_score
+            if not matched_cards:
+                for line in combined_lines:
+                    number_cards = cards_matched_by_name_and_number(db, line, combined_text)
+                    if number_cards:
+                        matched_cards = number_cards
+                        matched_name = line
+                        matched_name_score = float(number_cards[0].get("scanner_score") or 0.8)
+                        break
+            if not matched_cards:
+                for line in combined_lines:
+                    set_cards = cards_matched_by_name_and_set(db, line, combined_text)
+                    if set_cards:
+                        matched_cards = set_cards
+                        matched_name = line
+                        matched_name_score = float(set_cards[0].get("scanner_score") or 0.8)
+                        break
+            if matched_cards:
+                ocr_score = sum(combined_scores) / len(combined_scores) if combined_scores else 0.0
+                return {
+                    "recognized_text": combined_text,
+                    "collector_text": combined_text,
+                    "query": combined_query or combined_text,
+                    "match_type": "collector",
+                    "ocr_engine": "rapidocr-combined",
+                    "ocr_layout": "detected-card-combined",
+                    "ocr_score": round(min(ocr_score, matched_name_score), 3),
+                    "name_text": matched_name,
+                    "name_match_score": round(matched_name_score, 3),
+                    "card_detected": True,
+                    "card_detection_score": round(detection_score, 3),
+                    "debug_name_image": scanner_debug_data_url(detected_name_image),
+                    "debug_collector_image": scanner_debug_data_url(detected_collector_wide_image),
+                    "cards": matched_cards,
+                }
+    detected_name_text = ""
+    detected_name_score = 0.0
+    if detected_name_image is not None:
+        detected_name_text, detected_name_score = rapid_ocr_text(detected_name_image)
+    rapid_reads: list[str] = []
+    if detected_collector_image is not None:
+        rapid_sources = (
+            (detected_collector_image, "detected-card-left"),
+            (detected_collector_wide_image, "detected-card-wide"),
+        )
+    else:
+        source_data = ((payload.collector_wide_data, "wide"),) if payload.live else (
+            (payload.collector_wide_data, "wide"),
+            (payload.collector_data, "narrow"),
+        )
+        rapid_sources = tuple(
+            (decode_scanner_image(image_data, Image), layout)
+            for image_data, layout in source_data if image_data
+        )
+    for collector_image, layout in rapid_sources:
+        if collector_image is None:
+            continue
+        rapid_text, rapid_score = rapid_ocr_text(collector_image)
+        if not rapid_text:
+            continue
+        rapid_reads.append(rapid_text)
+        rapid_query, rapid_cards = scanner_print_matches(db, rapid_text)
+        if rapid_cards:
+            name_text = ""
+            name_match_score = 0.0
+            name_image = detected_name_image if detected_name_image is not None else (
+                decode_scanner_image(payload.image_data, Image) if payload.image_data else None
+            )
+            if name_image is not None:
+                if detected_name_image is not None:
+                    name_text = detected_name_text
+                else:
+                    name_text, _ = rapid_ocr_text(name_image)
+                confirmed_cards, name_match_score = cards_confirmed_by_name(rapid_cards, name_text)
+                if payload.live and not confirmed_cards:
+                    continue
+                if confirmed_cards:
+                    rapid_cards = confirmed_cards
+            combined_score = min(rapid_score, name_match_score) if name_match_score else rapid_score * (0.72 if payload.live else 1.0)
+            return {
+                "recognized_text": rapid_text,
+                "collector_text": " | ".join(rapid_reads),
+                "query": rapid_query,
+                "match_type": "collector",
+                "ocr_engine": "rapidocr",
+                "ocr_layout": layout,
+                "ocr_score": round(combined_score, 3),
+                "name_text": name_text,
+                "name_match_score": round(name_match_score, 3),
+                "card_detected": detected_card is not None,
+                "card_detection_score": round(detection_score, 3),
+                "debug_name_image": scanner_debug_data_url(detected_name_image) if detected_name_image is not None else None,
+                "debug_collector_image": scanner_debug_data_url(detected_collector_image) if detected_collector_image is not None else None,
+                "cards": rapid_cards,
+            }
+    if detected_name_image is not None and rapid_reads:
+        name_text, name_score = detected_name_text, detected_name_score
+        name_number_cards = cards_matched_by_name_and_number(db, name_text, " | ".join(rapid_reads))
+        if name_number_cards:
+            rapid_text = " | ".join(rapid_reads)
+            return {
+                "recognized_text": rapid_text,
+                "collector_text": rapid_text,
+                "query": rapid_text,
+                "match_type": "collector",
+                "ocr_engine": "rapidocr-name-number",
+                "ocr_score": round(name_score, 3),
+                "name_text": name_text,
+                "name_match_score": round(name_score, 3),
+                "card_detected": True,
+                "card_detection_score": round(detection_score, 3),
+                "debug_name_image": scanner_debug_data_url(detected_name_image),
+                "debug_collector_image": scanner_debug_data_url(detected_collector_image),
+                "cards": name_number_cards,
+            }
+    if payload.live:
+        if full_source_image is not None and detected_card is None:
+            fallback = full_frame_card_match(db, full_source_image)
+            if fallback:
+                return {
+                    "recognized_text": fallback["all_text"],
+                    "collector_text": fallback["collector_text"],
+                    "query": fallback["collector_text"],
+                    "match_type": "collector",
+                    "ocr_engine": "rapidocr-full-frame",
+                    "ocr_score": round(fallback["score"], 3),
+                    "name_text": fallback["name_text"],
+                    "name_match_score": round(fallback["score"], 3),
+                    "card_detected": detected_card is not None,
+                    "detection_mode": "full-frame-text",
+                    "cards": fallback["cards"],
+                }
+        rapid_text = " | ".join(rapid_reads)
+        return {
+            "recognized_text": rapid_text,
+            "collector_text": rapid_text,
+            "query": "",
+            "match_type": "none",
+            "ocr_engine": "rapidocr",
+            "ocr_score": 0.0,
+            "card_detected": detected_card is not None,
+            "card_detection_score": round(detection_score, 3),
+            "debug_name_image": scanner_debug_data_url(detected_name_image) if detected_name_image is not None else None,
+            "debug_collector_image": scanner_debug_data_url(detected_collector_image) if detected_collector_image is not None else None,
+            "name_text": detected_name_text,
+            "cards": [],
+        }
+    def read_collector(image_data: str, wide: bool) -> tuple[list[str], list[dict[str, Any]], bool]:
+        source = decode_scanner_image(image_data, Image).convert("L")
+        source = ImageOps.autocontrast(source)
+        source = source.resize((min(2000, source.width * 4), min(520, source.height * 4)))
+        source = ImageOps.invert(source).filter(ImageFilter.SHARPEN)
+        variants = [source, source.point(lambda value: 255 if value > 125 else 0), source.point(lambda value: 255 if value > 165 else 0)]
+        page_modes = (7, 13, 6) if wide else (6, 11, 7)
+        read_attempts: list[str] = []
+        votes: dict[int, int] = {}
+        cards_by_id: dict[int, dict[str, Any]] = {}
+        saw_fraction = False
+        for attempt_image, page_mode in zip(variants, page_modes):
+            attempt_image = ImageOps.expand(attempt_image, border=18, fill=255)
+            try:
+                attempt_text = pytesseract.image_to_string(
+                    attempt_image,
+                    lang="eng",
+                    config=(
+                        f"--psm {page_mode} "
+                        "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/- "
+                        "-c load_system_dawg=0 -c load_freq_dawg=0"
+                    ),
+                ).strip()
+            except (pytesseract.TesseractNotFoundError, pytesseract.TesseractError):
+                attempt_text = ""
+            if not attempt_text:
+                continue
+            read_attempts.append(attempt_text)
+            cards = scanner_print_matches(db, attempt_text)[1]
+            for card in cards:
+                card_id = int(card["id"])
+                votes[card_id] = votes.get(card_id, 0) + 1
+                cards_by_id[card_id] = card
+            if cards and re.search(r"[0-9O]\s*/\s*[0-9O]", attempt_text):
+                saw_fraction = True
+        ranked_ids = sorted(votes, key=lambda card_id: (-votes[card_id], card_id))
+        return read_attempts, [cards_by_id[card_id] for card_id in ranked_ids[:8]], saw_fraction
+
+    collector_texts: list[str] = list(rapid_reads)
+    wide_cards: list[dict[str, Any]] = []
+    if payload.collector_wide_data:
+        wide_texts, wide_cards, saw_fraction = read_collector(payload.collector_wide_data, True)
+        collector_texts.extend(wide_texts)
+        if wide_cards and saw_fraction:
+            collector_text = " | ".join(collector_texts)
+            return {"recognized_text": collector_text, "collector_text": collector_text, "query": collector_text, "match_type": "collector", "cards": wide_cards}
+    if payload.collector_data:
+        narrow_texts, narrow_cards, _ = read_collector(payload.collector_data, False)
+        collector_texts.extend(narrow_texts)
+        if narrow_cards:
+            collector_text = " | ".join(collector_texts)
+            return {"recognized_text": collector_text, "collector_text": collector_text, "query": collector_text, "match_type": "collector", "cards": narrow_cards}
+    if wide_cards:
+        collector_text = " | ".join(collector_texts)
+        return {"recognized_text": collector_text, "collector_text": collector_text, "query": collector_text, "match_type": "collector", "cards": wide_cards}
+    collector_text = " | ".join(collector_texts)
+    image = decode_scanner_image(payload.image_data, Image)
+    if image.width < 120 or image.height < 30:
+        raise HTTPException(status_code=400, detail="Namensbereich ist zu klein.")
+    image = ImageOps.autocontrast(image)
+    image = ImageEnhance.Contrast(image).enhance(1.8)
+    image = image.resize((min(1800, image.width * 2), min(400, image.height * 2)))
+    image = image.filter(ImageFilter.SHARPEN)
+    try:
+        text = pytesseract.image_to_string(image, lang="deu+eng", config="--psm 7").strip()
+    except pytesseract.TesseractNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="Tesseract OCR ist auf dem Server nicht installiert.") from exc
+    except pytesseract.TesseractError as exc:
+        raise HTTPException(status_code=503, detail="Deutsche/englische OCR-Sprachdaten fehlen auf dem Server.") from exc
+    query, cards = scanner_card_matches(db, text)
+    return {"recognized_text": text, "collector_text": collector_text, "query": query, "match_type": "name", "cards": cards}
+
+
+@app.post("/api/cards/scan-reports")
+def save_scanner_report(payload: ScannerReportIn) -> dict[str, Any]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="Bildverarbeitung ist auf dem Server nicht installiert.") from exc
+    result = payload.result or {}
+    if len(json.dumps(result, ensure_ascii=False)) > 200_000:
+        raise HTTPException(status_code=413, detail="Scanner-Report ist zu gross.")
+    report_dir = DATA_DIR / "scanner-reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_id = f"scan-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{uuid.uuid4().hex[:8]}"
+    image = decode_scanner_image(payload.image_data, Image).convert("RGB")
+    image_path = report_dir / f"{report_id}.jpg"
+    metadata_path = report_dir / f"{report_id}.json"
+    image.save(image_path, format="JPEG", quality=92)
+    version = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else app.version
+    metadata = {
+        "report_id": report_id,
+        "reported_at": datetime.now().isoformat(timespec="milliseconds"),
+        "manavault_version": version,
+        "expected": (payload.expected or "").strip(),
+        "image_file": image_path.name,
+        "result": result,
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"report_id": report_id, "saved": True}
+
+
+@app.get("/api/cards/scan-reports/export")
+def export_scanner_reports() -> Response:
+    report_dir = DATA_DIR / "scanner-reports"
+    files = sorted(path for path in report_dir.glob("scan-*.*") if path.suffix.lower() in {".jpg", ".json"}) if report_dir.exists() else []
+    if not files:
+        raise HTTPException(status_code=404, detail="Noch keine Scanner-Reports gespeichert.")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, arcname=path.name)
+    filename = f"ManaVault-scanner-reports-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def run_scryfall_import(payload: ImportRequest) -> None:
     try:
-        result = import_scryfall_data(payload.local_file, payload.limit, payload.bulk_type)
+        result = import_scryfall_data(payload.local_file, payload.limit, payload.bulk_type, payload.tokens_only)
+        cards_imported = result.get("cards_imported", result["imported"])
+        tokens_imported = result.get("tokens_imported", 0)
         set_scryfall_import_status(
             running=False,
             phase="done",
-            message=f"{result['imported']} Karten importiert.",
+            message=f"{cards_imported} Karten und {tokens_imported} Tokens/Embleme importiert.",
             imported=result["imported"],
             error=None,
             finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -1032,14 +2541,32 @@ def card_filter_sql(
 ) -> tuple[list[str], list[Any], str]:
     conditions = []
     params: list[Any] = []
-    selected_langs = [lang.strip().lower() for lang in langs.split(",") if lang.strip().lower() in {"en", "de"}]
-    if not selected_langs:
-        selected_langs = ["en", "de"]
-    placeholders = ",".join("?" for _ in selected_langs)
-    conditions.append(f"c.lang IN ({placeholders})")
-    params.extend(selected_langs)
+    if langs.strip().lower() not in {"all", "*"}:
+        allowed_langs = {"en", "de", "fr", "it", "es", "pt", "ja", "ko", "ru", "zhs", "zht"}
+        selected_langs = [lang.strip().lower() for lang in langs.split(",") if lang.strip().lower() in allowed_langs]
+        if not selected_langs:
+            selected_langs = ["en", "de"]
+        placeholders = ",".join("?" for _ in selected_langs)
+        conditions.append(f"c.lang IN ({placeholders})")
+        params.extend(selected_langs)
     query = q.strip().lower()
-    if query:
+    identifier = parse_print_identifier(q)
+    if identifier:
+        conditions.append("upper(c.set_code) = ?")
+        params.append(identifier["set_code"])
+        conditions.append("upper(ltrim(c.collector_number, '0')) = ?")
+        params.append(identifier["collector_number"])
+        if identifier.get("lang"):
+            conditions.append("c.lang = ?")
+            params.append(identifier["lang"])
+        if identifier.get("rarity"):
+            conditions.append("c.rarity = ?")
+            params.append(identifier["rarity"])
+        if identifier.get("kind") == "token":
+            conditions.append("c.is_token = 1")
+        elif identifier.get("kind") == "card":
+            conditions.append("c.is_token = 0")
+    elif query:
         term = f"%{query}%"
         conditions.append(
             """
@@ -1084,8 +2611,8 @@ def card_filter_sql(
     legal_key = legal_format.strip().lower()
     allowed_formats = {"standard", "pioneer", "modern", "legacy", "vintage", "commander", "pauper", "brawl", "historic"}
     if legal_key in allowed_formats:
-        conditions.append("c.legalities LIKE ?")
-        params.append(f'%"{legal_key}":"legal"%')
+        conditions.append(f"json_extract(c.legalities, '$.{legal_key}') = ?")
+        params.append("legal")
     rarity_key = rarity.strip().lower()
     allowed_rarities = {"common", "uncommon", "rare", "mythic", "special", "bonus"}
     if rarity_key in allowed_rarities:
@@ -1113,11 +2640,45 @@ def card_filter_sql(
         "released": f"c.released_at DESC, {name_order}",
     }
     order = sort_orders.get(sort, name_order)
-    if query and sort == "name":
+    if query and not identifier and sort == "name":
         order = f"CASE WHEN lower(c.name) LIKE ? OR lower(COALESCE(c.printed_name, '')) LIKE ? THEN 0 ELSE 1 END, {order}"
         params.append(f"{query}%")
         params.append(f"{query}%")
     return conditions, params, order
+
+
+def parse_print_identifier(value: str) -> dict[str, str] | None:
+    prepared = re.sub(r"\b([TCURML])(?=0*[0-9])", r"\1 ", (value or "").upper())
+    tokens = re.findall(r"[A-Z0-9]+", prepared)
+    number_index = next((index for index, token in enumerate(tokens) if re.fullmatch(r"0*[0-9]+[A-Z]?", token)), None)
+    if number_index is None:
+        return None
+    collector_number = normalized_collector_number(tokens[number_index])
+    languages = {"DE", "EN", "FR", "IT", "ES", "PT", "JA", "KO", "RU", "ZHS", "ZHT"}
+    rarity_codes = {"C": "common", "U": "uncommon", "R": "rare", "M": "mythic"}
+    print_markers = {*rarity_codes, "T", "L"}
+    set_candidates = [
+        token for index, token in enumerate(tokens)
+        if index != number_index
+        and token not in languages
+        and token not in print_markers
+        and re.fullmatch(r"[A-Z0-9]{2,6}", token)
+        and re.search(r"[A-Z]", token)
+    ]
+    if not set_candidates:
+        return None
+    language = next((token.lower() for token in tokens if token in languages), "")
+    rarity = rarity_codes.get(tokens[0], "") if tokens and tokens[0] in rarity_codes else ""
+    marker = tokens[number_index - 1] if number_index > 0 and tokens[number_index - 1] in print_markers else ""
+    if not marker and tokens and tokens[0] in print_markers:
+        marker = tokens[0]
+    return {
+        "collector_number": collector_number,
+        "set_code": set_candidates[0],
+        "lang": language,
+        "rarity": rarity,
+        "kind": "token" if marker == "T" else ("card" if marker else ""),
+    }
 
 
 def collector_sort_value(value: Any) -> tuple[int, str]:
@@ -1229,6 +2790,170 @@ def collection_stats(db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]
                 "value_eur": value,
             })
     top_value_cards.sort(key=lambda item: item["value_eur"], reverse=True)
+    set_totals = {
+        row["code"]: dict(row)
+        for row in db.execute(
+            """
+            SELECT lower(set_code) AS code,
+                   COALESCE(MAX(set_name), upper(set_code)) AS name,
+                   COUNT(DISTINCT collector_number) AS total_prints
+            FROM cards
+            WHERE set_code IS NOT NULL AND set_code != '' AND lang = 'en'
+              AND collector_number NOT LIKE 'A-%'
+            GROUP BY lower(set_code)
+            """
+        ).fetchall()
+    }
+    if not set_totals:
+        set_totals = {
+            row["code"]: dict(row)
+            for row in db.execute(
+                """
+                SELECT lower(set_code) AS code,
+                       COALESCE(MAX(set_name), upper(set_code)) AS name,
+                       COUNT(DISTINCT collector_number) AS total_prints
+                FROM cards
+                WHERE set_code IS NOT NULL AND set_code != ''
+                  AND collector_number NOT LIKE 'A-%'
+                GROUP BY lower(set_code)
+                """
+            ).fetchall()
+        }
+    owned_sets = {
+        row["code"]: dict(row)
+        for row in db.execute(
+            """
+            SELECT lower(c.set_code) AS code,
+                   COUNT(DISTINCT c.collector_number) AS owned_prints,
+                   COUNT(cc.id) AS owned_copies
+            FROM card_copies cc
+            JOIN cards c ON c.id = cc.card_id
+            WHERE cc.is_proxy = 0 AND c.set_code IS NOT NULL AND c.set_code != ''
+            GROUP BY lower(c.set_code)
+            """
+        ).fetchall()
+    }
+    proxy_sets = {
+        row["code"]: dict(row)
+        for row in db.execute(
+            """
+            SELECT lower(c.set_code) AS code,
+                   COUNT(DISTINCT c.collector_number) AS proxy_prints,
+                   COUNT(cc.id) AS proxy_copies
+            FROM card_copies cc
+            JOIN cards c ON c.id = cc.card_id
+            WHERE cc.is_proxy = 1 AND c.set_code IS NOT NULL AND c.set_code != ''
+            GROUP BY lower(c.set_code)
+            """
+        ).fetchall()
+    }
+    set_stats = []
+    visible_set_codes = sorted(set(owned_sets.keys()) | set(proxy_sets.keys()))
+    for code in visible_set_codes:
+        owned = owned_sets.get(code, {})
+        proxy = proxy_sets.get(code, {})
+        owned_copies = int(owned.get("owned_copies") or 0)
+        proxy_copies = int(proxy.get("proxy_copies") or 0)
+        if owned_copies + proxy_copies <= 0:
+            continue
+        total = set_totals.get(code, {"code": code, "name": code.upper(), "total_prints": owned.get("owned_prints") or proxy.get("proxy_prints") or 0})
+        total_prints = int(total.get("total_prints") or 0)
+        owned_prints = int(owned.get("owned_prints") or 0)
+        missing_prints = max(0, total_prints - owned_prints)
+        set_stats.append({
+            "code": code,
+            "name": total.get("name") or code.upper(),
+            "total_prints": total_prints,
+            "owned_prints": owned_prints,
+            "owned_copies": owned_copies,
+            "proxy_prints": int(proxy.get("proxy_prints") or 0),
+            "proxy_copies": proxy_copies,
+            "missing_prints": missing_prints,
+            "completion_percent": round((owned_prints / total_prints) * 100, 1) if total_prints else 0,
+        })
+    set_stats.sort(key=lambda item: (item["completion_percent"], item["owned_prints"]), reverse=True)
+    for item in set_stats[:24]:
+        missing_rows = db.execute(
+            """
+            SELECT name, collector_number, rarity
+            FROM cards
+            WHERE lang = 'en'
+              AND lower(set_code) = ?
+              AND collector_number NOT LIKE 'A-%'
+              AND collector_number NOT IN (
+                SELECT owned.collector_number
+                FROM card_copies cc
+                JOIN cards owned ON owned.id = cc.card_id
+                WHERE cc.is_proxy = 0 AND lower(owned.set_code) = ?
+              )
+            GROUP BY collector_number
+            ORDER BY CAST(collector_number AS INTEGER), collector_number
+            LIMIT 8
+            """,
+            (item["code"], item["code"]),
+        ).fetchall()
+        item["missing_examples"] = [dict(row) for row in missing_rows]
+    deck_value_stats = []
+    deck_rows = db.execute("SELECT id, name, format FROM decks ORDER BY name").fetchall()
+    for deck in deck_rows:
+        slot_rows = db.execute(
+            """
+            SELECT ds.quantity, c.*
+            FROM deck_slots ds
+            JOIN cards c ON c.id = ds.card_id
+            WHERE ds.deck_id = ?
+            ORDER BY c.name
+            """,
+            (deck["id"],),
+        ).fetchall()
+        deck_list_value = 0.0
+        assigned_original_value = 0.0
+        assigned_proxy_value = 0.0
+        missing_value = 0.0
+        slot_quantity = 0
+        assigned_originals = 0
+        assigned_proxies = 0
+        missing_cards = 0
+        for slot in slot_rows:
+            card = card_row(slot)
+            price_eur, price_source = card_price_eur_with_fallback(db, card)
+            quantity = int(slot["quantity"] or 0)
+            assigned = db.execute(
+                """
+                SELECT
+                  COALESCE(SUM(CASE WHEN is_proxy = 0 THEN 1 ELSE 0 END), 0) AS originals,
+                  COALESCE(SUM(CASE WHEN is_proxy = 1 THEN 1 ELSE 0 END), 0) AS proxies
+                FROM card_copies
+                WHERE card_id = ? AND assigned_deck_id = ?
+                """,
+                (slot["id"], deck["id"]),
+            ).fetchone()
+            originals = int(assigned["originals"] or 0)
+            proxies = int(assigned["proxies"] or 0)
+            covered = min(quantity, originals + proxies)
+            missing = max(0, quantity - covered)
+            slot_quantity += quantity
+            assigned_originals += originals
+            assigned_proxies += proxies
+            missing_cards += missing
+            deck_list_value += price_eur * quantity
+            assigned_original_value += price_eur * min(originals, quantity)
+            assigned_proxy_value += price_eur * min(proxies, max(0, quantity - originals))
+            missing_value += price_eur * missing
+        deck_value_stats.append({
+            "deck_id": deck["id"],
+            "name": deck["name"],
+            "format": deck["format"],
+            "slot_quantity": slot_quantity,
+            "assigned_originals": assigned_originals,
+            "assigned_proxies": assigned_proxies,
+            "missing_cards": missing_cards,
+            "deck_list_value_eur": round(deck_list_value, 2),
+            "assigned_original_value_eur": round(assigned_original_value, 2),
+            "assigned_proxy_value_eur": round(assigned_proxy_value, 2),
+            "missing_value_eur": round(missing_value, 2),
+        })
+    deck_value_stats.sort(key=lambda item: item["deck_list_value_eur"], reverse=True)
     rarity_order = ["common", "uncommon", "rare", "mythic", "special", "bonus", "unknown"]
     return {
         "total_copies": total_copies,
@@ -1243,6 +2968,8 @@ def collection_stats(db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]
         "rarity_counts": {key: rarity_counts.get(key, 0) for key in rarity_order if key in rarity_counts},
         "language_counts": dict(sorted(language_counts.items())),
         "top_value_cards": top_value_cards[:8],
+        "set_stats": set_stats[:24],
+        "deck_value_stats": deck_value_stats,
     }
 
 
@@ -1260,13 +2987,15 @@ def collection_summary(
     langs: str = "en,de",
     min_price_eur: float | None = None,
     sort: str = "name",
+    limit: int = 120,
+    offset: int = 0,
     db: sqlite3.Connection = Depends(db_dep),
 ) -> list[dict[str, Any]]:
     conditions, params, order = card_filter_sql(q, colors, cmc_min, cmc_max, card_type, tag, legal_format, rarity, set_code, langs, sort)
     where = f"AND {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(
         f"""
-        SELECT c.id, c.name, c.printed_name, c.lang, c.mana_cost, c.type_line, c.printed_type_line,
+        SELECT c.id, c.name, c.printed_name, c.lang, c.mana_cost, c.type_line, c.printed_type_line, c.is_token,
                c.cmc, c.image_url, c.set_code, c.collector_number, c.rarity, c.released_at, c.prices_json,
                COUNT(cc.id) AS total_count,
                SUM(CASE WHEN cc.is_proxy = 0 THEN 1 ELSE 0 END) AS owned_count,
@@ -1297,7 +3026,10 @@ def collection_summary(
         if min_price_eur is not None and price_eur < min_price_eur:
             continue
         items.append(item)
-    return sort_collection_items(items, sort)[:500]
+    safe_limit = max(1, min(limit, 500))
+    safe_offset = max(0, offset)
+    sorted_items = sort_collection_items(items, sort)
+    return sorted_items[safe_offset:safe_offset + safe_limit]
 
 
 @app.get("/api/collection/export")
@@ -1305,7 +3037,7 @@ def collection_summary(
 def export_collection_for_ai(format: str = "jsonl", db: sqlite3.Connection = Depends(db_dep)) -> PlainTextResponse:
     rows = db.execute(
         """
-        SELECT c.*, 
+        SELECT c.*,
                COUNT(cc.id) AS total_count,
                SUM(CASE WHEN cc.is_proxy = 0 THEN 1 ELSE 0 END) AS original_count,
                SUM(CASE WHEN cc.is_proxy = 1 THEN 1 ELSE 0 END) AS proxy_count,
@@ -1436,16 +3168,15 @@ def collection_card_detail(card_id: int, db: sqlite3.Connection = Depends(db_dep
                END AS state,
                CASE
                  WHEN cc.assigned_deck_id IS NOT NULL THEN d.name
-                 ELSE COALESCE(l.name, 'Ohne Ort')
+                 ELSE 'Sammlung'
                END AS place_name,
                CASE
                  WHEN cc.assigned_deck_id IS NOT NULL THEN 'Deck'
-                 ELSE COALESCE(l.type, 'Sammlung')
+                 ELSE 'Sammlung'
                END AS place_type,
                cc.is_proxy,
                COUNT(*) AS quantity
         FROM card_copies cc
-        LEFT JOIN locations l ON l.id = cc.location_id
         LEFT JOIN decks d ON d.id = cc.assigned_deck_id
         WHERE cc.card_id = ?
         GROUP BY state, place_name, place_type, cc.is_proxy
@@ -1455,8 +3186,15 @@ def collection_card_detail(card_id: int, db: sqlite3.Connection = Depends(db_dep
     ).fetchall()
     places_data = [dict(row) for row in places]
     places_data.extend(planned_rows_for_card(db, card_id))
+    card_data = card_row(card)
+    price_eur, price_source = card_price_eur_with_fallback(db, card_data)
+    original_count = sum(1 for copy in copies if not copy["is_proxy"])
+    card_data["price_eur"] = price_eur
+    card_data["price_source"] = price_source
+    card_data["collection_value_eur"] = round(price_eur * original_count, 2)
+    card_data["original_count"] = original_count
     return {
-        "card": card_row(card),
+        "card": card_data,
         "tags": readonly_card_tags(db, card["id"], card["type_line"], card["oracle_text"]),
         "copies": [dict(row) for row in copies],
         "places": places_data,
@@ -1602,6 +3340,29 @@ def create_copy(payload: CopyIn, db: sqlite3.Connection = Depends(db_dep)) -> di
     return {"id": cur.lastrowid, "card_id": payload.card_id, "counts": card_collection_counts(db, payload.card_id)}
 
 
+@app.post("/api/collection/copies/batch")
+def create_copies(payload: CopyBatchIn, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    card = db.execute("SELECT id FROM cards WHERE id = ?", (payload.card_id,)).fetchone()
+    if not card:
+        raise HTTPException(status_code=404, detail="Karte nicht gefunden.")
+    quantity = max(1, min(payload.quantity, 100))
+    location_id = None if payload.assigned_deck_id else payload.location_id
+    values = [(
+        payload.card_id, int(payload.is_proxy), payload.condition, payload.language,
+        int(payload.foil), location_id, payload.assigned_deck_id, payload.note,
+    ) for _ in range(quantity)]
+    db.executemany(
+        """
+        INSERT INTO card_copies
+            (card_id, is_proxy, condition, language, foil, location_id, assigned_deck_id, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    db.commit()
+    return {"created": quantity, "card_id": payload.card_id, "counts": card_collection_counts(db, payload.card_id)}
+
+
 @app.patch("/api/collection/copies/{copy_id}")
 def patch_copy(copy_id: int, payload: CopyPatch, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
     existing = db.execute("SELECT id FROM card_copies WHERE id = ?", (copy_id,)).fetchone()
@@ -1638,6 +3399,30 @@ def delete_copy(copy_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
 @app.get("/api/locations")
 def locations(db: sqlite3.Connection = Depends(db_dep)) -> list[dict[str, Any]]:
     return [dict(row) for row in db.execute("SELECT * FROM locations ORDER BY name").fetchall()]
+
+
+@app.get("/api/history")
+def copy_history(
+    q: str = "",
+    action: str = "",
+    limit: int = 500,
+    db: sqlite3.Connection = Depends(db_dep),
+) -> list[dict[str, Any]]:
+    conditions = []
+    params: list[Any] = []
+    if q.strip():
+        conditions.append("lower(card_name) LIKE ?")
+        params.append(f"%{q.strip().lower()}%")
+    allowed_actions = {"added", "deck_added", "deck_removed", "deck_moved", "moved", "deleted"}
+    if action in allowed_actions:
+        conditions.append("action = ?")
+        params.append(action)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(
+        f"SELECT * FROM copy_history {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+        [*params, max(1, min(limit, 2000))],
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 @app.post("/api/locations")
@@ -1737,16 +3522,52 @@ def delete_location(
 def decks(db: sqlite3.Connection = Depends(db_dep)) -> list[dict[str, Any]]:
     rows = db.execute(
         """
-        SELECT d.*, c.name AS commander_name,
-               COALESCE(SUM(ds.quantity), 0) AS slot_quantity
+        SELECT d.*, c.name AS commander_name, c.image_url AS commander_image_url,
+               COALESCE(SUM(CASE WHEN COALESCE(dc.is_token, 0) = 0 THEN ds.quantity ELSE 0 END), 0) AS slot_quantity,
+               COALESCE(SUM(CASE WHEN COALESCE(dc.is_token, 0) = 1 THEN ds.quantity ELSE 0 END), 0) AS token_quantity
         FROM decks d
         LEFT JOIN cards c ON c.id = d.commander_card_id
         LEFT JOIN deck_slots ds ON ds.deck_id = d.id
+        LEFT JOIN cards dc ON dc.id = ds.card_id
         GROUP BY d.id
         ORDER BY d.name
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        deck = dict(row)
+        slot_rows = db.execute(
+            """
+            SELECT ds.quantity, c.*
+            FROM deck_slots ds
+            JOIN cards c ON c.id = ds.card_id
+            WHERE ds.deck_id = ?
+            """,
+            (row["id"],),
+        ).fetchall()
+        colors: set[str] = set()
+        types: set[str] = set()
+        deck_value = 0.0
+        for slot in slot_rows:
+            card = card_row(slot)
+            if card.get("is_token"):
+                continue
+            identity = card.get("color_identity") or card.get("colors") or []
+            if identity:
+                colors.update(color for color in identity if color in {"W", "U", "B", "R", "G"})
+            else:
+                colors.add("C")
+            type_line = str(card.get("type_line") or "")
+            for type_name in ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land"]:
+                if type_name in type_line:
+                    types.add(type_name)
+            price_eur, _price_source = card_price_eur_with_fallback(db, card)
+            deck_value += price_eur * int(slot["quantity"] or 0)
+        deck["colors"] = sorted(colors)
+        deck["types"] = sorted(types)
+        deck["deck_list_value_eur"] = round(deck_value, 2)
+        result.append(deck)
+    return result
 
 
 @app.post("/api/decks")
@@ -1774,8 +3595,329 @@ def patch_deck(deck_id: int, payload: DeckPatch, db: sqlite3.Connection = Depend
         values.append(value)
     values.append(deck_id)
     db.execute(f"UPDATE decks SET {', '.join(columns)} WHERE id = ?", values)
+    if "commander_card_id" in data:
+        sync_active_variant_if_not_editing(deck_id, db)
     db.commit()
     return {"id": deck_id, "updated": True}
+
+
+def deck_slot_snapshot(deck_id: int, db: sqlite3.Connection) -> list[dict[str, Any]]:
+    return rows_as_dicts(
+        db.execute(
+            """
+            SELECT card_id, quantity, allow_proxy, note, zone
+            FROM deck_slots
+            WHERE deck_id = ?
+            ORDER BY zone, card_id
+            """,
+            (deck_id,),
+        ).fetchall()
+    )
+
+
+def replace_working_deck_slots(deck_id: int, slots: list[dict[str, Any]], db: sqlite3.Connection) -> None:
+    db.execute("DELETE FROM deck_slots WHERE deck_id = ?", (deck_id,))
+    for slot in slots:
+        db.execute(
+            """
+            INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy, note, zone)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                deck_id,
+                int(slot["card_id"]),
+                max(1, int(slot.get("quantity") or 1)),
+                int(bool(slot.get("allow_proxy", True))),
+                slot.get("note"),
+                normalized_deck_zone(slot.get("zone")),
+            ),
+        )
+
+
+def replace_variant_slots(variant_id: int, slots: list[dict[str, Any]], db: sqlite3.Connection) -> None:
+    db.execute("DELETE FROM deck_variant_slots WHERE variant_id = ?", (variant_id,))
+    for slot in slots:
+        db.execute(
+            """
+            INSERT INTO deck_variant_slots (variant_id, card_id, quantity, allow_proxy, note, zone)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                variant_id,
+                int(slot["card_id"]),
+                max(1, int(slot.get("quantity") or 1)),
+                int(bool(slot.get("allow_proxy", True))),
+                slot.get("note"),
+                normalized_deck_zone(slot.get("zone")),
+            ),
+        )
+
+
+def create_variant_snapshot(
+    deck_id: int,
+    name: str,
+    slots: list[dict[str, Any]],
+    db: sqlite3.Connection,
+    commander_card_id: int | None = None,
+) -> int:
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Bitte einen Variantennamen angeben.")
+    try:
+        cur = db.execute(
+            "INSERT INTO deck_variants (deck_id, name, commander_card_id) VALUES (?, ?, ?)",
+            (deck_id, clean_name, commander_card_id),
+        )
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Eine Variante mit diesem Namen existiert bereits.") from error
+    replace_variant_slots(int(cur.lastrowid), slots, db)
+    return int(cur.lastrowid)
+
+
+def sync_active_variant_if_not_editing(deck_id: int, db: sqlite3.Connection) -> None:
+    editing = db.execute("SELECT 1 FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()
+    if editing:
+        return
+    deck = db.execute("SELECT active_variant_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    if deck and deck["active_variant_id"]:
+        replace_variant_slots(int(deck["active_variant_id"]), deck_slot_snapshot(deck_id, db), db)
+        db.execute(
+            """
+            UPDATE deck_variants
+            SET commander_card_id = (SELECT commander_card_id FROM decks WHERE id = ?),
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE id = ?
+            """,
+            (deck_id, deck["active_variant_id"]),
+        )
+
+
+def deck_edit_is_dirty(deck_id: int, db: sqlite3.Connection) -> bool:
+    session = db.execute("SELECT * FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()
+    if not session:
+        return False
+    baseline = json.loads(session["baseline_slots_json"])
+    current = deck_slot_snapshot(deck_id, db)
+    normalized = lambda slots: sorted(
+        (
+            int(slot["card_id"]),
+            int(slot.get("quantity") or 0),
+            int(bool(slot.get("allow_proxy", True))),
+            slot.get("note") or "",
+            normalized_deck_zone(slot.get("zone")),
+        )
+        for slot in slots
+    )
+    deck = db.execute("SELECT commander_card_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    return normalized(baseline) != normalized(current) or deck["commander_card_id"] != session["baseline_commander_card_id"]
+
+
+def reconcile_deck_assignments(deck_id: int, db: sqlite3.Connection) -> None:
+    requirements = db.execute(
+        """
+        SELECT card_id, SUM(quantity) AS quantity,
+               SUM(CASE WHEN allow_proxy = 1 THEN quantity ELSE 0 END) AS proxy_quantity
+        FROM deck_slots
+        WHERE deck_id = ?
+        GROUP BY card_id
+        """,
+        (deck_id,),
+    ).fetchall()
+    required = {int(row["card_id"]): (int(row["quantity"]), int(row["proxy_quantity"])) for row in requirements}
+    assigned_cards = db.execute(
+        "SELECT DISTINCT card_id FROM card_copies WHERE assigned_deck_id = ?",
+        (deck_id,),
+    ).fetchall()
+    for row in assigned_cards:
+        card_id = int(row["card_id"])
+        quantity, proxy_quantity = required.get(card_id, (0, 0))
+        copies = db.execute(
+            "SELECT id, is_proxy FROM card_copies WHERE assigned_deck_id = ? AND card_id = ? ORDER BY is_proxy, id",
+            (deck_id, card_id),
+        ).fetchall()
+        kept_real = 0
+        kept_proxy = 0
+        for copy in copies:
+            keep = False
+            if not copy["is_proxy"] and kept_real < quantity:
+                kept_real += 1
+                keep = True
+            elif copy["is_proxy"] and kept_real + kept_proxy < quantity and kept_proxy < proxy_quantity:
+                kept_proxy += 1
+                keep = True
+            if not keep:
+                db.execute("UPDATE card_copies SET assigned_deck_id = NULL WHERE id = ?", (copy["id"],))
+    for card_id, (quantity, proxy_quantity) in required.items():
+        assigned = db.execute(
+            "SELECT is_proxy, COUNT(*) AS quantity FROM card_copies WHERE assigned_deck_id = ? AND card_id = ? GROUP BY is_proxy",
+            (deck_id, card_id),
+        ).fetchall()
+        real_count = sum(int(row["quantity"]) for row in assigned if not row["is_proxy"])
+        proxy_count = sum(int(row["quantity"]) for row in assigned if row["is_proxy"])
+        needed = max(0, quantity - real_count - proxy_count)
+        free_real = db.execute(
+            "SELECT id FROM card_copies WHERE card_id = ? AND is_proxy = 0 AND assigned_deck_id IS NULL ORDER BY id LIMIT ?",
+            (card_id, needed),
+        ).fetchall()
+        for copy in free_real:
+            db.execute("UPDATE card_copies SET assigned_deck_id = ?, location_id = NULL WHERE id = ?", (deck_id, copy["id"]))
+        needed -= len(free_real)
+        proxy_capacity = max(0, proxy_quantity - proxy_count)
+        if needed > 0 and proxy_capacity > 0:
+            free_proxy = db.execute(
+                "SELECT id FROM card_copies WHERE card_id = ? AND is_proxy = 1 AND assigned_deck_id IS NULL ORDER BY id LIMIT ?",
+                (card_id, min(needed, proxy_capacity)),
+            ).fetchall()
+            for copy in free_proxy:
+                db.execute("UPDATE card_copies SET assigned_deck_id = ?, location_id = NULL WHERE id = ?", (deck_id, copy["id"]))
+
+
+@app.post("/api/decks/{deck_id}/edit/begin")
+def begin_deck_edit(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    deck = db.execute("SELECT id, active_variant_id, commander_card_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    existing = db.execute("SELECT started_at FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()
+    if not existing:
+        db.execute(
+            """
+            INSERT INTO deck_edit_sessions
+                (deck_id, base_variant_id, baseline_slots_json, baseline_commander_card_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (deck_id, deck["active_variant_id"], json.dumps(deck_slot_snapshot(deck_id, db)), deck["commander_card_id"]),
+        )
+        db.commit()
+    return {"editing": True, "started_at": existing["started_at"] if existing else None}
+
+
+@app.post("/api/decks/{deck_id}/edit/save")
+def save_deck_edit(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    deck = db.execute("SELECT id, active_variant_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    if deck["active_variant_id"]:
+        replace_variant_slots(int(deck["active_variant_id"]), deck_slot_snapshot(deck_id, db), db)
+        db.execute(
+            """
+            UPDATE deck_variants
+            SET commander_card_id = (SELECT commander_card_id FROM decks WHERE id = ?),
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE id = ?
+            """,
+            (deck_id, deck["active_variant_id"]),
+        )
+    db.execute("DELETE FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,))
+    db.commit()
+    return {"saved": True, "active_variant_id": deck["active_variant_id"]}
+
+
+@app.post("/api/decks/{deck_id}/edit/discard")
+def discard_deck_edit(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    session = db.execute("SELECT * FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()
+    if not session:
+        return {"discarded": False}
+    replace_working_deck_slots(deck_id, json.loads(session["baseline_slots_json"]), db)
+    db.execute(
+        "UPDATE decks SET commander_card_id = ?, active_variant_id = ? WHERE id = ?",
+        (session["baseline_commander_card_id"], session["base_variant_id"], deck_id),
+    )
+    reconcile_deck_assignments(deck_id, db)
+    db.execute("DELETE FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,))
+    db.commit()
+    return {"discarded": True}
+
+
+@app.get("/api/decks/{deck_id}/variants")
+def deck_variants(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    deck = db.execute("SELECT id, active_variant_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    variants = rows_as_dicts(
+        db.execute(
+            """
+            SELECT dv.*, COALESCE(SUM(dvs.quantity), 0) AS card_count
+            FROM deck_variants dv
+            LEFT JOIN deck_variant_slots dvs ON dvs.variant_id = dv.id
+            WHERE dv.deck_id = ?
+            GROUP BY dv.id
+            ORDER BY dv.created_at, dv.id
+            """,
+            (deck_id,),
+        ).fetchall()
+    )
+    return {
+        "active_variant_id": deck["active_variant_id"],
+        "editing": bool(db.execute("SELECT 1 FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()),
+        "dirty": deck_edit_is_dirty(deck_id, db),
+        "variants": variants,
+    }
+
+
+@app.post("/api/decks/{deck_id}/variants")
+def save_as_deck_variant(deck_id: int, payload: DeckVariantCreateIn, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    deck = db.execute("SELECT id, active_variant_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
+    session = db.execute("SELECT * FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,)).fetchone()
+    if not session:
+        raise HTTPException(status_code=409, detail="Keine laufende Deckbearbeitung.")
+    if not deck["active_variant_id"]:
+        create_variant_snapshot(
+            deck_id,
+            payload.base_name,
+            json.loads(session["baseline_slots_json"]),
+            db,
+            session["baseline_commander_card_id"],
+        )
+    commander = db.execute("SELECT commander_card_id FROM decks WHERE id = ?", (deck_id,)).fetchone()
+    variant_id = create_variant_snapshot(
+        deck_id,
+        payload.name,
+        deck_slot_snapshot(deck_id, db),
+        db,
+        commander["commander_card_id"],
+    )
+    db.execute("UPDATE decks SET active_variant_id = ? WHERE id = ?", (variant_id, deck_id))
+    db.execute("DELETE FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,))
+    db.commit()
+    return {"created": True, "id": variant_id, "active_variant_id": variant_id}
+
+
+@app.patch("/api/decks/{deck_id}/variants/{variant_id}")
+def rename_deck_variant(deck_id: int, variant_id: int, payload: DeckVariantPatchIn, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    clean_name = payload.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Bitte einen Variantennamen angeben.")
+    try:
+        cur = db.execute("UPDATE deck_variants SET name = ? WHERE id = ? AND deck_id = ?", (clean_name, variant_id, deck_id))
+        db.commit()
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Eine Variante mit diesem Namen existiert bereits.") from error
+    if not cur.rowcount:
+        raise HTTPException(status_code=404, detail="Variante nicht gefunden.")
+    return {"updated": True}
+
+
+@app.post("/api/decks/{deck_id}/variants/{variant_id}/activate")
+def activate_deck_variant(deck_id: int, variant_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    if deck_edit_is_dirty(deck_id, db):
+        raise HTTPException(status_code=409, detail="Bitte aktuelle Aenderungen zuerst speichern oder verwerfen.")
+    db.execute("DELETE FROM deck_edit_sessions WHERE deck_id = ?", (deck_id,))
+    variant = db.execute("SELECT id, name, commander_card_id FROM deck_variants WHERE id = ? AND deck_id = ?", (variant_id, deck_id)).fetchone()
+    if not variant:
+        raise HTTPException(status_code=404, detail="Variante nicht gefunden.")
+    slots = rows_as_dicts(db.execute("SELECT card_id, quantity, allow_proxy, note, zone FROM deck_variant_slots WHERE variant_id = ?", (variant_id,)).fetchall())
+    replace_working_deck_slots(deck_id, slots, db)
+    db.execute(
+        "UPDATE decks SET active_variant_id = ?, commander_card_id = ? WHERE id = ?",
+        (variant_id, variant["commander_card_id"], deck_id),
+    )
+    reconcile_deck_assignments(deck_id, db)
+    db.commit()
+    status = deck_status(deck_id, db)
+    missing = sum(int(item["missing"]) for item in status["cards"])
+    return {"activated": True, "id": variant_id, "name": variant["name"], "missing": missing}
 
 
 @app.delete("/api/decks/{deck_id}")
@@ -1795,15 +3937,49 @@ def deck_detail(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
         raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
     slots = db.execute(
         """
-        SELECT ds.*, c.name, c.mana_cost, c.type_line, c.image_url
+        SELECT ds.*, c.name, c.mana_cost, c.type_line, c.image_url, c.is_token,
+               CASE WHEN d.commander_card_id = c.id THEN 1 ELSE 0 END AS is_cover
         FROM deck_slots ds
         JOIN cards c ON c.id = ds.card_id
+        JOIN decks d ON d.id = ds.deck_id
         WHERE ds.deck_id = ?
         ORDER BY c.name
         """,
         (deck_id,),
     ).fetchall()
     return {"deck": dict(deck), "slots": [dict(row) for row in slots]}
+
+
+@app.get("/api/decks/{deck_id}/qr")
+def deck_qr_code(
+    deck_id: int,
+    request: Request,
+    base_url: str | None = None,
+    download: bool = False,
+    db: sqlite3.Connection = Depends(db_dep),
+) -> Response:
+    deck, token = ensure_deck_share_token(deck_id, db)
+    origin = configured_public_base_url()
+    if not origin:
+        raise HTTPException(status_code=409, detail="Oeffentliche Adresse noch nicht eingerichtet.")
+    deck_url = f"{origin}/share/{token}"
+    try:
+        import qrcode
+        from qrcode.image.svg import SvgPathImage
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="QR-Code-Unterstuetzung ist nicht installiert.") from exc
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
+    qr.add_data(deck_url)
+    qr.make(fit=True)
+    output = io.BytesIO()
+    qr.make_image(image_factory=SvgPathImage).save(output)
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", deck["name"]).strip("-") or f"deck-{deck_id}"
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=output.getvalue(),
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": f'{disposition}; filename="{safe_name}-qr.svg"'},
+    )
 
 
 @app.post("/api/decks/{deck_id}/slots")
@@ -1814,17 +3990,19 @@ def add_slot(deck_id: int, payload: DeckSlotIn, db: sqlite3.Connection = Depends
     card = db.execute("SELECT id FROM cards WHERE id = ?", (payload.card_id,)).fetchone()
     if not deck or not card:
         raise HTTPException(status_code=404, detail="Deck oder Karte nicht gefunden.")
+    zone = normalized_deck_zone(payload.zone)
     cur = db.execute(
         """
-        INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy, note)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(deck_id, card_id) DO UPDATE SET
+        INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy, note, zone)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(deck_id, card_id, zone) DO UPDATE SET
             quantity=excluded.quantity,
             allow_proxy=excluded.allow_proxy,
             note=excluded.note
         """,
-        (deck_id, payload.card_id, payload.quantity, int(payload.allow_proxy), payload.note),
+        (deck_id, payload.card_id, payload.quantity, int(payload.allow_proxy), payload.note, zone),
     )
+    sync_active_variant_if_not_editing(deck_id, db)
     db.commit()
     return {"id": cur.lastrowid}
 
@@ -1843,16 +4021,18 @@ def upsert_deck_slot(
     card_id: int,
     quantity_delta: int,
     allow_proxy: bool,
+    zone: str = "mainboard",
 ) -> None:
+    zone = normalized_deck_zone(zone)
     db.execute(
         """
-        INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(deck_id, card_id) DO UPDATE SET
+        INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy, zone)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(deck_id, card_id, zone) DO UPDATE SET
             quantity=deck_slots.quantity + excluded.quantity,
             allow_proxy=excluded.allow_proxy
         """,
-        (deck_id, card_id, quantity_delta, int(allow_proxy)),
+        (deck_id, card_id, quantity_delta, int(allow_proxy), zone),
     )
 
 
@@ -1928,13 +4108,26 @@ def smart_add_card(deck_id: int, payload: DeckAddCardIn, db: sqlite3.Connection 
             )
             created_proxy_ids.append(cur.lastrowid)
 
+    elif action == "create_original":
+        for _ in range(payload.quantity):
+            cur = db.execute(
+                """
+                INSERT INTO card_copies
+                    (card_id, is_proxy, condition, language, foil, location_id, assigned_deck_id, note)
+                VALUES (?, 0, 'NM', 'en', 0, NULL, ?, 'Created from deckbuilder')
+                """,
+                (payload.card_id, deck_id),
+            )
+            assigned_copy_ids.append(cur.lastrowid)
+
     elif action == "plan":
         pass
 
     else:
         raise HTTPException(status_code=400, detail="Unbekannte action.")
 
-    upsert_deck_slot(db, deck_id, payload.card_id, payload.quantity, payload.allow_proxy)
+    upsert_deck_slot(db, deck_id, payload.card_id, payload.quantity, payload.allow_proxy, payload.zone)
+    sync_active_variant_if_not_editing(deck_id, db)
     db.commit()
     return {
         "requires_decision": False,
@@ -1952,18 +4145,25 @@ def assign_free_copies(deck_id: int, payload: DeckAssignFreeIn | None = None, db
     if not deck:
         raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
     payload = payload or DeckAssignFreeIn()
+    scope = payload.scope if payload.scope in {"cards", "tokens", "all"} else "cards"
     slot_params: list[Any] = [deck_id]
     card_filter = ""
     if payload.card_id is not None:
         card_filter = "AND ds.card_id = ?"
         slot_params.append(payload.card_id)
+    scope_filter = ""
+    if payload.card_id is None and scope == "cards":
+        scope_filter = "AND COALESCE(c.is_token, 0) = 0"
+    elif payload.card_id is None and scope == "tokens":
+        scope_filter = "AND COALESCE(c.is_token, 0) = 1"
     slots = db.execute(
         f"""
-        SELECT ds.*, c.name
+        SELECT ds.*, c.name, c.is_token
         FROM deck_slots ds
         JOIN cards c ON c.id = ds.card_id
         WHERE ds.deck_id = ?
         {card_filter}
+        {scope_filter}
         ORDER BY c.name
         """,
         slot_params,
@@ -2024,11 +4224,308 @@ def assign_free_copies(deck_id: int, payload: DeckAssignFreeIn | None = None, db
 
 @app.delete("/api/decks/{deck_id}/slots/{slot_id}")
 def delete_slot(deck_id: int, slot_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
-    cur = db.execute("DELETE FROM deck_slots WHERE id = ? AND deck_id = ?", (slot_id, deck_id))
-    db.commit()
-    if cur.rowcount == 0:
+    slot = db.execute(
+        "SELECT card_id FROM deck_slots WHERE id = ? AND deck_id = ?",
+        (slot_id, deck_id),
+    ).fetchone()
+    if not slot:
         raise HTTPException(status_code=404, detail="Slot nicht gefunden.")
-    return {"deleted": True}
+    db.execute(
+        "UPDATE decks SET commander_card_id = NULL WHERE id = ? AND commander_card_id = ?",
+        (deck_id, slot["card_id"]),
+    )
+    cur = db.execute("DELETE FROM deck_slots WHERE id = ? AND deck_id = ?", (slot_id, deck_id))
+    before_assigned = db.execute(
+        "SELECT COUNT(*) AS count FROM card_copies WHERE assigned_deck_id = ? AND card_id = ?",
+        (deck_id, slot["card_id"]),
+    ).fetchone()["count"]
+    reconcile_deck_assignments(deck_id, db)
+    after_assigned = db.execute(
+        "SELECT COUNT(*) AS count FROM card_copies WHERE assigned_deck_id = ? AND card_id = ?",
+        (deck_id, slot["card_id"]),
+    ).fetchone()["count"]
+    sync_active_variant_if_not_editing(deck_id, db)
+    db.commit()
+    return {
+        "deleted": True,
+        "freed_card_id": slot["card_id"],
+        "freed_copies": max(0, int(before_assigned) - int(after_assigned)),
+        "counts": card_collection_counts(db, slot["card_id"]),
+    }
+
+
+@app.post("/api/decks/{deck_id}/slots/{slot_id}/decrement")
+def decrement_slot(deck_id: int, slot_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    slot = db.execute(
+        "SELECT card_id, quantity FROM deck_slots WHERE id = ? AND deck_id = ?",
+        (slot_id, deck_id),
+    ).fetchone()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot nicht gefunden.")
+
+    card_id = int(slot["card_id"])
+    old_quantity = int(slot["quantity"] or 0)
+    remaining_quantity = max(0, old_quantity - 1)
+    before_assigned = db.execute(
+        "SELECT COUNT(*) AS count FROM card_copies WHERE assigned_deck_id = ? AND card_id = ?",
+        (deck_id, card_id),
+    ).fetchone()["count"]
+
+    if remaining_quantity == 0:
+        db.execute(
+            "UPDATE decks SET commander_card_id = NULL WHERE id = ? AND commander_card_id = ?",
+            (deck_id, card_id),
+        )
+        db.execute("DELETE FROM deck_slots WHERE id = ? AND deck_id = ?", (slot_id, deck_id))
+    else:
+        db.execute(
+            "UPDATE deck_slots SET quantity = ? WHERE id = ? AND deck_id = ?",
+            (remaining_quantity, slot_id, deck_id),
+        )
+    reconcile_deck_assignments(deck_id, db)
+    after_assigned = db.execute(
+        "SELECT COUNT(*) AS count FROM card_copies WHERE assigned_deck_id = ? AND card_id = ?",
+        (deck_id, card_id),
+    ).fetchone()["count"]
+    freed_copies = max(0, int(before_assigned) - int(after_assigned))
+    sync_active_variant_if_not_editing(deck_id, db)
+
+    db.commit()
+    return {
+        "removed": remaining_quantity == 0,
+        "remaining_quantity": remaining_quantity,
+        "freed_card_id": card_id,
+        "freed_copies": freed_copies,
+        "counts": card_collection_counts(db, card_id),
+    }
+
+
+@app.post("/api/decks/{deck_id}/slots/{slot_id}/zone")
+def move_slot_zone(deck_id: int, slot_id: int, payload: DeckSlotZoneIn, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    zone = normalized_deck_zone(payload.zone)
+    slot = db.execute("SELECT * FROM deck_slots WHERE id = ? AND deck_id = ?", (slot_id, deck_id)).fetchone()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot nicht gefunden.")
+    if slot["zone"] == zone:
+        return {"moved": False, "zone": zone}
+    existing = db.execute(
+        "SELECT id, quantity FROM deck_slots WHERE deck_id = ? AND card_id = ? AND zone = ?",
+        (deck_id, slot["card_id"], zone),
+    ).fetchone()
+    if existing:
+        db.execute("UPDATE deck_slots SET quantity = quantity + ? WHERE id = ?", (slot["quantity"], existing["id"]))
+        db.execute("DELETE FROM deck_slots WHERE id = ?", (slot_id,))
+    else:
+        db.execute("UPDATE deck_slots SET zone = ? WHERE id = ?", (zone, slot_id))
+    sync_active_variant_if_not_editing(deck_id, db)
+    db.commit()
+    return {"moved": True, "zone": zone}
+
+
+def required_tokens_for_deck(deck_id: int, db: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT t.*, COALESCE(source.printed_name, source.name) AS source_name
+        FROM deck_slots ds
+        JOIN cards source ON source.id = ds.card_id AND COALESCE(source.is_token, 0) = 0
+        JOIN card_token_links link ON link.source_scryfall_id = source.scryfall_id
+        JOIN cards t ON t.scryfall_id = link.token_scryfall_id AND COALESCE(t.is_token, 0) = 1
+        WHERE ds.deck_id = ?
+        ORDER BY CASE t.lang WHEN 'de' THEN 0 WHEN 'en' THEN 1 ELSE 2 END,
+                 t.name, t.released_at DESC
+        """,
+        (deck_id,),
+    ).fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        card = card_row(row)
+        token_key = str(card.get("oracle_id") or card.get("scryfall_id"))
+        entry = grouped.setdefault(
+            token_key,
+            {
+                "token_key": token_key,
+                "card_id": int(card["id"]),
+                "name": card.get("printed_name") or card.get("name") or "Token",
+                "oracle_name": card.get("name") or "Token",
+                "type_line": card.get("printed_type_line") or card.get("type_line") or "",
+                "image_url": card.get("image_url"),
+                "set_code": card.get("set_code"),
+                "collector_number": card.get("collector_number"),
+                "lang": card.get("lang"),
+                "is_token": True,
+                "source_names": set(),
+            },
+        )
+        entry["source_names"].add(str(row["source_name"]))
+
+    assigned_rows = db.execute(
+        """
+        SELECT COALESCE(c.oracle_id, c.scryfall_id) AS token_key,
+               SUM(CASE WHEN cc.is_proxy = 0 THEN 1 ELSE 0 END) AS originals,
+               SUM(CASE WHEN cc.is_proxy = 1 THEN 1 ELSE 0 END) AS proxies
+        FROM card_copies cc
+        JOIN cards c ON c.id = cc.card_id AND COALESCE(c.is_token, 0) = 1
+        WHERE cc.assigned_deck_id = ?
+        GROUP BY COALESCE(c.oracle_id, c.scryfall_id)
+        """,
+        (deck_id,),
+    ).fetchall()
+    assigned = {str(row["token_key"]): dict(row) for row in assigned_rows}
+    listed_rows = db.execute(
+        """
+        SELECT COALESCE(c.oracle_id, c.scryfall_id) AS token_key, SUM(ds.quantity) AS quantity
+        FROM deck_slots ds
+        JOIN cards c ON c.id = ds.card_id AND COALESCE(c.is_token, 0) = 1
+        WHERE ds.deck_id = ?
+        GROUP BY COALESCE(c.oracle_id, c.scryfall_id)
+        """,
+        (deck_id,),
+    ).fetchall()
+    listed = {str(row["token_key"]): int(row["quantity"] or 0) for row in listed_rows}
+
+    result = []
+    for token_key, entry in grouped.items():
+        counts = assigned.get(token_key, {})
+        originals = int(counts.get("originals") or 0)
+        proxies = int(counts.get("proxies") or 0)
+        item = dict(entry)
+        item["source_names"] = sorted(entry["source_names"])
+        item["suggested_quantity"] = 1
+        item["listed_quantity"] = listed.get(token_key, 0)
+        item["originals"] = originals
+        item["proxies"] = proxies
+        item["missing"] = max(0, 1 - originals - proxies)
+        result.append(item)
+    return sorted(result, key=lambda item: str(item["name"]).lower())
+
+
+ABILITY_COUNTER_LABELS = {
+    "deathtouch": "Todesberührung-Marker",
+    "double strike": "Doppelschlag-Marker",
+    "first strike": "Erstschlag-Marker",
+    "flying": "Flugfähigkeit-Marker",
+    "haste": "Eile-Marker",
+    "hexproof": "Fluchsicherheits-Marker",
+    "indestructible": "Unzerstörbarkeits-Marker",
+    "lifelink": "Lebensverknüpfungs-Marker",
+    "menace": "Bedrohlichkeits-Marker",
+    "reach": "Reichweiten-Marker",
+    "trample": "Trampelschaden-Marker",
+    "vigilance": "Wachsamkeits-Marker",
+}
+
+COMMON_COUNTER_LABELS = {
+    "age": "Altersmarker",
+    "bounty": "Kopfgeldmarker",
+    "brick": "Ziegelmarker",
+    "charge": "Ladungsmarker",
+    "defense": "Verteidigungsmarker",
+    "delay": "Verzögerungsmarker",
+    "depletion": "Erschöpfungsmarker",
+    "doom": "Verhängnismarker",
+    "dream": "Traummarker",
+    "energy": "Energiemarker",
+    "experience": "Erfahrungsmarker",
+    "fate": "Schicksalsmarker",
+    "finality": "Endgültigkeitsmarker",
+    "fuse": "Zündmarker",
+    "growth": "Wachstumsmarker",
+    "ice": "Eismarker",
+    "infection": "Infektionsmarker",
+    "invitation": "Einladungsmarker",
+    "knowledge": "Wissensmarker",
+    "level": "Stufenmarker",
+    "lore": "Sagenmarker",
+    "loyalty": "Loyalitätsmarker",
+    "luck": "Glücksmarker",
+    "oil": "Ölmarker",
+    "page": "Seitenmarker",
+    "petal": "Blütenblattmarker",
+    "poison": "Giftmarker",
+    "quest": "Questmarker",
+    "shield": "Schildmarker",
+    "spore": "Sporenmarker",
+    "storage": "Speichermarker",
+    "stun": "Betäubungsmarker",
+    "time": "Zeitmarker",
+    "training": "Trainingsmarker",
+    "verse": "Versmarker",
+    "vitality": "Vitalitätsmarker",
+    "void": "Leerenmarker",
+    "wish": "Wunschmarker",
+}
+
+
+def accessories_for_deck(deck_id: int, db: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT COALESCE(c.printed_name, c.name) AS display_name, c.name, c.type_line, c.oracle_text
+        FROM deck_slots ds
+        JOIN cards c ON c.id = ds.card_id
+        WHERE ds.deck_id = ? AND COALESCE(c.is_token, 0) = 0
+        """,
+        (deck_id,),
+    ).fetchall()
+    accessories: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add(category: str, key: str, name: str, source: str) -> None:
+        item = accessories.setdefault(
+            (category, key),
+            {"category": category, "key": key, "name": name, "source_names": set()},
+        )
+        item["source_names"].add(source)
+
+    for row in rows:
+        source = str(row["display_name"] or row["name"])
+        text = str(row["oracle_text"] or "").lower().replace("−", "-")
+        type_line = str(row["type_line"] or "").lower()
+
+        for match in re.finditer(r"(?<!\w)([+-]\d+/[+-]\d+) counters?\b", text):
+            value = match.group(1)
+            add("counter", value, f"{value}-Marker", source)
+        for ability, label in ABILITY_COUNTER_LABELS.items():
+            if re.search(rf"\b{re.escape(ability)} counters?\b", text):
+                add("ability_counter", ability, label, source)
+        for counter, label in COMMON_COUNTER_LABELS.items():
+            if re.search(rf"\b{re.escape(counter)} counters?\b", text):
+                add("counter", counter, label, source)
+
+        if "planeswalker" in type_line:
+            add("counter", "loyalty", COMMON_COUNTER_LABELS["loyalty"], source)
+        if "saga" in type_line:
+            add("counter", "lore", COMMON_COUNTER_LABELS["lore"], source)
+        if "battle" in type_line:
+            add("counter", "defense", COMMON_COUNTER_LABELS["defense"], source)
+        if "{e}" in text:
+            add("counter", "energy", COMMON_COUNTER_LABELS["energy"], source)
+        if re.search(r"\b(infect|toxic \d+|poison counters?)\b", text):
+            add("counter", "poison", COMMON_COUNTER_LABELS["poison"], source)
+
+        game_aids = [
+            (r"\broll (?:a|one|two|three|\d+) d20\b", "d20", "W20"),
+            (r"\broll (?:a|one|two|three|\d+) d6\b", "d6", "W6"),
+            (r"\bflip (?:a|one|two|three|\d+) coins?\b", "coin", "Münze"),
+            (r"\bventure into the dungeon\b|\benter the dungeon\b", "dungeon", "Dungeon-Karten"),
+            (r"\btake the initiative\b|\bthe initiative\b", "initiative", "Initiative-Hilfskarte"),
+            (r"\btake the initiative\b|\bthe initiative\b", "undercity", "Unterstadt-Dungeon"),
+            (r"\bbecome(?:s)? the monarch\b|\bthe monarch\b", "monarch", "Monarch-Hilfskarte"),
+            (r"\bbecomes? day\b|\bbecomes? night\b|\bdaybound\b|\bnightbound\b", "day-night", "Tag/Nacht-Hilfskarte"),
+            (r"\bthe ring tempts you\b", "ring", "Der Ring-Hilfskarte"),
+            (r"\bopen an attraction\b|\bvisit an attraction\b", "attraction", "Attraction-Karten"),
+            (r"\bsticker(?:s| sheet)?\b", "stickers", "Stickerbögen"),
+            (r"\bcity's blessing\b", "citys-blessing", "Segen-der-Stadt-Hilfskarte"),
+        ]
+        for pattern, key, label in game_aids:
+            if re.search(pattern, text):
+                add("game_aid", key, label, source)
+
+    category_order = {"ability_counter": 0, "counter": 1, "game_aid": 2}
+    result = []
+    for item in accessories.values():
+        serialized = dict(item)
+        serialized["source_names"] = sorted(item["source_names"])
+        result.append(serialized)
+    return sorted(result, key=lambda item: (category_order.get(item["category"], 9), item["name"].lower()))
 
 
 @app.get("/api/decks/{deck_id}/status")
@@ -2038,38 +4535,49 @@ def deck_status(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
         raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
     slots = db.execute(
         """
-        SELECT ds.*, c.name, c.image_url, c.type_line
+        SELECT ds.*, c.name, c.image_url, c.type_line, c.is_token
         FROM deck_slots ds
         JOIN cards c ON c.id = ds.card_id
         WHERE ds.deck_id = ?
-        ORDER BY c.name
+        ORDER BY CASE ds.zone WHEN 'mainboard' THEN 0 ELSE 1 END, c.name
         """,
         (deck_id,),
     ).fetchall()
     status_rows = []
+    token_rows = []
     shopping_list = []
     proxy_list = []
     conflicts = []
+    allocation_by_card: dict[int, dict[str, Any]] = {}
     for slot in slots:
         card_id = slot["card_id"]
-        copy_rows = db.execute(
-            """
-            SELECT cc.*, d.name AS deck_name
-            FROM card_copies cc
-            LEFT JOIN decks d ON d.id = cc.assigned_deck_id
-            WHERE cc.card_id = ?
-            """,
-            (card_id,),
-        ).fetchall()
-        real_assigned = sum(1 for copy in copy_rows if not copy["is_proxy"] and copy["assigned_deck_id"] == deck_id)
-        proxy_assigned = sum(1 for copy in copy_rows if copy["is_proxy"] and copy["assigned_deck_id"] == deck_id)
-        free_real = sum(1 for copy in copy_rows if not copy["is_proxy"] and copy["assigned_deck_id"] is None)
-        free_proxy = sum(1 for copy in copy_rows if copy["is_proxy"] and copy["assigned_deck_id"] is None)
-        in_other_decks = [dict(copy) for copy in copy_rows if copy["assigned_deck_id"] not in (None, deck_id)]
+        if card_id not in allocation_by_card:
+            copy_rows = db.execute(
+                """
+                SELECT cc.*, d.name AS deck_name
+                FROM card_copies cc
+                LEFT JOIN decks d ON d.id = cc.assigned_deck_id
+                WHERE cc.card_id = ?
+                """,
+                (card_id,),
+            ).fetchall()
+            allocation_by_card[card_id] = {
+                "real_remaining": sum(1 for copy in copy_rows if not copy["is_proxy"] and copy["assigned_deck_id"] == deck_id),
+                "proxy_remaining": sum(1 for copy in copy_rows if copy["is_proxy"] and copy["assigned_deck_id"] == deck_id),
+                "free_real": sum(1 for copy in copy_rows if not copy["is_proxy"] and copy["assigned_deck_id"] is None),
+                "free_proxy": sum(1 for copy in copy_rows if copy["is_proxy"] and copy["assigned_deck_id"] is None),
+                "in_other_decks": [dict(copy) for copy in copy_rows if copy["assigned_deck_id"] not in (None, deck_id)],
+            }
+        allocation = allocation_by_card[card_id]
+        free_real = allocation["free_real"]
+        free_proxy = allocation["free_proxy"]
+        in_other_decks = allocation["in_other_decks"]
         needed = slot["quantity"]
-        real_used = min(needed, real_assigned)
+        real_used = min(needed, allocation["real_remaining"])
+        allocation["real_remaining"] -= real_used
         remaining = needed - real_used
-        proxy_used = min(remaining, proxy_assigned) if slot["allow_proxy"] else 0
+        proxy_used = min(remaining, allocation["proxy_remaining"]) if slot["allow_proxy"] else 0
+        allocation["proxy_remaining"] -= proxy_used
         missing = needed - real_used - proxy_used
         item = {
             "slot_id": slot["id"],
@@ -2085,7 +4593,12 @@ def deck_status(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
             "allow_proxy": bool(slot["allow_proxy"]),
             "copies_in_other_decks": len(in_other_decks),
             "other_decks": sorted({copy["deck_name"] for copy in in_other_decks if copy["deck_name"]}),
+            "is_token": bool(slot["is_token"]),
+            "zone": slot["zone"],
         }
+        if slot["is_token"]:
+            token_rows.append(item)
+            continue
         status_rows.append(item)
         if missing > 0 and slot["allow_proxy"]:
             proxy_list.append(
@@ -2094,6 +4607,7 @@ def deck_status(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
                     "name": slot["name"],
                     "quantity": missing,
                     "cardmarket_url": cardmarket_url(slot["name"]),
+                    "zone": slot["zone"],
                 }
             )
         elif missing > 0:
@@ -2103,6 +4617,7 @@ def deck_status(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
                     "name": slot["name"],
                     "quantity": missing,
                     "cardmarket_url": cardmarket_url(slot["name"]),
+                    "zone": slot["zone"],
                 }
             )
         if in_other_decks and missing > 0:
@@ -2110,6 +4625,9 @@ def deck_status(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[
     return {
         "deck": dict(deck),
         "cards": status_rows,
+        "tokens": token_rows,
+        "required_tokens": required_tokens_for_deck(deck_id, db),
+        "accessories": accessories_for_deck(deck_id, db),
         "shopping_list": shopping_list,
         "proxy_list": proxy_list,
         "conflicts": conflicts,
@@ -2222,12 +4740,17 @@ LINE_RE = re.compile(r"^\s*(?:(\d+)\s*x?\s+)?(.+?)\s*$", re.IGNORECASE)
 SET_SUFFIX_RE = re.compile(r"\s+\([A-Za-z0-9]{2,6}\).*$")
 
 
-def parse_deck_list(text: str) -> list[tuple[int, str]]:
-    items: list[tuple[int, str]] = []
-    ignored_headers = {"deck", "commander", "sideboard", "maybeboard"}
+def parse_deck_list(text: str) -> list[tuple[int, str, str]]:
+    items: list[tuple[int, str, str]] = []
+    headers = {"deck", "mainboard", "commander", "sideboard", "maybeboard", "tokens"}
+    zone = "mainboard"
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or line.lower().rstrip(":") in ignored_headers:
+        header = line.lower().rstrip(":")
+        if header in headers:
+            zone = "sideboard" if header == "sideboard" else "mainboard"
+            continue
+        if not line or line.startswith("#"):
             continue
         match = LINE_RE.match(line)
         if not match:
@@ -2236,7 +4759,7 @@ def parse_deck_list(text: str) -> list[tuple[int, str]]:
         name = SET_SUFFIX_RE.sub("", match.group(2)).strip()
         name = re.sub(r"\s+\d+[a-z]?$", "", name, flags=re.IGNORECASE).strip()
         if name:
-            items.append((quantity, name))
+            items.append((quantity, name, zone))
     return items
 
 
@@ -2253,23 +4776,25 @@ def import_deck_list(deck_id: int, payload: DeckListImport, db: sqlite3.Connecti
     if not deck:
         raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
     if payload.replace:
+        db.execute("UPDATE card_copies SET assigned_deck_id = NULL WHERE assigned_deck_id = ?", (deck_id,))
         db.execute("DELETE FROM deck_slots WHERE deck_id = ?", (deck_id,))
     imported = []
     unresolved = []
-    for quantity, name in parse_deck_list(payload.text):
+    for quantity, name, zone in parse_deck_list(payload.text):
         card = find_card_by_name(db, name)
         if not card:
             unresolved.append({"name": name, "quantity": quantity})
             continue
         db.execute(
             """
-            INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(deck_id, card_id) DO UPDATE SET quantity=deck_slots.quantity + excluded.quantity
+            INSERT INTO deck_slots (deck_id, card_id, quantity, allow_proxy, zone)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(deck_id, card_id, zone) DO UPDATE SET quantity=deck_slots.quantity + excluded.quantity
             """,
-            (deck_id, card["id"], quantity),
+            (deck_id, card["id"], quantity, zone),
         )
-        imported.append({"card_id": card["id"], "name": card["name"], "quantity": quantity})
+        imported.append({"card_id": card["id"], "name": card["name"], "quantity": quantity, "zone": zone})
+    sync_active_variant_if_not_editing(deck_id, db)
     db.commit()
     return {"imported": imported, "unresolved": unresolved}
 
@@ -2281,7 +4806,7 @@ def export_deck_list(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> 
         raise HTTPException(status_code=404, detail="Deck nicht gefunden.")
     rows = db.execute(
         """
-        SELECT ds.quantity, c.name
+        SELECT ds.quantity, ds.zone, c.name, c.is_token
         FROM deck_slots ds
         JOIN cards c ON c.id = ds.card_id
         WHERE ds.deck_id = ?
@@ -2289,4 +4814,12 @@ def export_deck_list(deck_id: int, db: sqlite3.Connection = Depends(db_dep)) -> 
         """,
         (deck_id,),
     ).fetchall()
-    return {"text": "\n".join(f"{row['quantity']} {row['name']}" for row in rows)}
+    cards = [row for row in rows if not row["is_token"] and row["zone"] == "mainboard"]
+    sideboard = [row for row in rows if not row["is_token"] and row["zone"] == "sideboard"]
+    tokens = [row for row in rows if row["is_token"]]
+    sections = ["\n".join(f"{row['quantity']} {row['name']}" for row in cards)]
+    if sideboard:
+        sections.append("Sideboard\n" + "\n".join(f"{row['quantity']} {row['name']}" for row in sideboard))
+    if tokens:
+        sections.append("Tokens\n" + "\n".join(f"{row['quantity']} {row['name']}" for row in tokens))
+    return {"text": "\n\n".join(section for section in sections if section)}

@@ -1,18 +1,116 @@
 # ManaVault
 
-ManaVault ist eine lokale Web-App fuer Magic: The Gathering Collection- und Deck-Management.
+[![Release](https://img.shields.io/github/v/release/Futoro/ManaVault)](https://github.com/Futoro/ManaVault/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Status: Public Beta](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 
-## Setup
+ManaVault ist ein selbst gehosteter Sammlungs- und Deckmanager fuer **Magic: The Gathering**. Der Schwerpunkt liegt auf der physischen Sammlung: ManaVault weiss, welche konkrete Karte frei ist, in welchem Deck sie steckt oder fuer eine Deckliste noch fehlt.
 
-Einfachste Variante unter Windows:
+> **Projektstatus:** Public Beta. Backups vor Updates werden ausdruecklich empfohlen.
 
-```text
-ManaVault starten.bat
+## Funktionen
+
+- lokale Sammlung mit einzelnen Originalen und Proxys
+- schneller Kartenimport ueber Scryfalls Bulk-Daten
+- Karten-Scanner fuer Setcode und Sammlernummer
+- Deckbuilder mit physischen Karten-Zuordnungen und Fehlkarten
+- benannte Deckvarianten mit genau einer aktiven, physisch belegenden Variante
+- getrennte Bereiche fuer Hauptdeck, Sideboard und Tokens
+- automatische Token-Empfehlungen und Deckzubehoer-Hinweise
+- Deckwerte, Planung, Einkaufsliste und Cardmarket-Wants-Export
+- QR-Codes und separater schreibgeschuetzter Dienst fuer Deckfreigaben
+- kleine Nutzerdaten-Backups sowie vollstaendige SQLite-Backups
+- Windows-, Linux-, Raspberry-Pi- und systemd-Skripte
+
+## Schnellstart unter Windows
+
+Voraussetzung: eine aktuelle Python-3-Installation.
+
+```powershell
+git clone https://github.com/Futoro/ManaVault.git
+cd ManaVault
 ```
 
-Das Skript erstellt bei Bedarf die lokale Python-Umgebung, installiert Abhaengigkeiten und startet die App.
+Danach `ManaVault starten.bat` doppelt anklicken. Das Skript erstellt die virtuelle Python-Umgebung, installiert die Abhaengigkeiten und oeffnet ManaVault unter:
 
-Manuelle Variante:
+```text
+http://127.0.0.1:8000
+```
+
+## Schnellstart unter Linux oder auf einem Raspberry Pi
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip unzip
+git clone https://github.com/Futoro/ManaVault.git
+cd ManaVault
+chmod +x start-linux.sh
+./start-linux.sh
+```
+
+Im lokalen Netzwerk ist die App danach unter `http://<server-ip>:8000` erreichbar.
+
+Fuer den dauerhaften Betrieb als systemd-Dienst:
+
+```bash
+chmod +x install-linux-service.sh
+sudo ./install-linux-service.sh
+```
+
+Die ausfuehrliche Anleitung steht in [README-LINUX.md](README-LINUX.md). Fuer eine extern erreichbare, ausschliesslich lesende Deckansicht siehe [README-PUBLIC.md](README-PUBLIC.md).
+
+## Erster Kartenimport
+
+Unter Windows kann `Scryfall Daten laden.bat` gestartet werden. Unter Linux:
+
+```bash
+chmod +x import-scryfall-linux.sh
+./import-scryfall-linux.sh
+```
+
+Alternativ kann der Import in der laufenden Weboberflaeche unter **Daten** gestartet werden. ManaVault verwendet Scryfalls Bulk-Data-Endpunkt und speichert Kartendaten lokal in SQLite. Kartenbilder werden nicht vorab heruntergeladen; gespeichert werden lediglich die Bild-URLs.
+
+Wenn die Karten bereits importiert wurden und nur Tokens oder Embleme aktualisiert werden sollen:
+
+```bash
+./import-scryfall-linux.sh --tokens-only
+```
+
+## Deckvarianten und Sideboard
+
+Ein neues Deck besitzt zunaechst nur seinen aktuellen Stand. Im Deckbuilder stehen drei Aktionen zur Verfuegung:
+
+- **Speichern** aktualisiert den aktiven Deckstand.
+- **Verwerfen** stellt den Zustand beim Oeffnen wieder her.
+- **Als neue Variante** bewahrt den bisherigen Stand und aktiviert eine neue benannte Variante.
+
+Beim ersten Aufteilen wird der vorherige Stand automatisch als `Original` gespeichert. Nur die aktive Variante belegt Karten aus der Sammlung. Beim Aktivieren einer unvollstaendigen Variante bleiben nicht verfuegbare Karten sichtbar als fehlend markiert.
+
+Hauptdeck und Sideboard werden getrennt gespeichert und angezeigt, gehoeren bei der aktiven Variante aber beide zum physischen Deck.
+
+## Backups und Updates
+
+Die lokale Datenbank liegt standardmaessig unter:
+
+```text
+data/manavault.sqlite3
+```
+
+Dieser Ordner wird von Git ignoriert. Sammlungsdaten gehoeren niemals in Commits oder Issues.
+
+Im Bereich **Daten** koennen ein kleines Nutzerdaten-Backup und ein vollstaendiges Datenbank-Backup erstellt werden. Linux-Update-Skripte sichern die Datenbank vor der Installation automatisch.
+
+Fertige Versionen und Linux-Update-Pakete erscheinen unter [GitHub Releases](https://github.com/Futoro/ManaVault/releases).
+
+## Sicherheit
+
+Die Verwaltungsoberflaeche auf Port `8000` besitzt aktuell keine Benutzeranmeldung. Sie ist fuer ein vertrauenswuerdiges lokales Netzwerk gedacht und darf nicht direkt ins Internet gestellt werden.
+
+Fuer oeffentliche QR-Decklinks stellt ManaVault einen getrennten Nur-Lese-Dienst bereit. Weitere Hinweise stehen in [SECURITY.md](SECURITY.md).
+
+## Entwicklung
+
+Manueller Entwicklungsstart:
 
 ```powershell
 python -m venv .venv
@@ -21,92 +119,16 @@ pip install -r requirements.txt
 uvicorn backend.main:app --reload
 ```
 
-Danach im Browser oeffnen:
+Die wichtigsten Schnittstellen sind ueber FastAPIs automatisch erzeugte Dokumentation unter `/docs` einsehbar. Hinweise fuer Beitraege stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```text
-http://127.0.0.1:8000
-```
+## Drittanbieter und rechtlicher Hinweis
 
-## Linux / Raspberry Pi
+ManaVault verwendet die oeffentliche Scryfall-API, Scryfall-Bulk-Daten und von Scryfall bereitgestellte Bild-URLs. Scryfall ist nicht mit diesem Projekt verbunden.
 
-Die Windows-Dateien bleiben bestehen. Fuer Linux gibt es eigene Skripte:
+ManaVault ist inoffizieller Fan-Content und weder von Wizards genehmigt noch unterstuetzt. Teile der verwendeten Materialien sind Eigentum von Wizards of the Coast. © Wizards of the Coast LLC.
 
-```bash
-chmod +x start-linux.sh import-scryfall-linux.sh
-./start-linux.sh
-```
+Magic: The Gathering, Kartennamen, Kartentexte, Symbole und Illustrationen sind Eigentum ihrer jeweiligen Rechteinhaber. Dieses Repository lizenziert ausschliesslich den ManaVault-Quellcode; heruntergeladene Kartendaten und Kartenbilder sind nicht Bestandteil der MIT-Lizenz.
 
-Auf einem Raspberry Pi ist die App danach im Netzwerk erreichbar unter:
+## Lizenz
 
-```text
-http://<raspberry-pi-ip>:8000
-```
-
-Die komplette Anleitung steht in:
-
-```text
-README-LINUX.md
-```
-
-Auf einem Linux-Server ohne Oberflaeche kann ManaVault direkt als Dienst installiert werden:
-
-```bash
-chmod +x install-linux-service.sh uninstall-linux-service.sh
-sudo ./install-linux-service.sh
-```
-
-## Scryfall Import
-
-Einfachste Variante:
-
-```text
-Scryfall Daten laden.bat
-```
-
-Das laedt den aktuellen Scryfall `all_cards` Bulk-Dump herunter und importiert ihn in `data/manavault.sqlite3`. Dadurch werden auch nicht-englische Drucke mit Feldern wie `printed_name` importiert.
-
-Alternative in der laufenden App:
-
-In der Weboberflaeche auf **Scryfall Bulk importieren** klicken. ManaVault nutzt Scryfalls Bulk-Data-Endpunkt, speichert die JSON-Datei lokal unter `data/` und importiert Kartendaten in SQLite. Deutsche Kartennamen werden ueber Scryfalls `printed_name` gefunden.
-
-Es werden nur Bild-URLs gespeichert. Kartenbilder werden nicht vorab heruntergeladen.
-
-## Datenhaltung
-
-- `cards`: Scryfall-Kartendaten
-- `card_copies`: einzelne physische Karten oder Proxies
-- `locations`: Orte wie Stock, Binder, Box, Trade Binder und Deck
-- `decks`: mehrere Decks
-- `deck_slots`: geplante Deckliste, auch fuer Karten, die noch nicht als Copy vorhanden sind
-
-Die Datenbank liegt unter:
-
-```text
-data/manavault.sqlite3
-```
-
-## Sammlung exportieren
-
-In der Seite **Sammlung** gibt es den Button **Export**. Der Export kann als `JSONL` oder `Markdown` heruntergeladen werden.
-
-Empfohlen fuer Deckvorschlaege ist `JSONL`: Jede Zeile beschreibt eine Karte mit Menge, freien Copies, Proxies, Fundorten, Tags, Preis und Sammlungswert. Proxies werden separat gezaehlt und nicht in den Kartenwert eingerechnet.
-
-## API-Auszug
-
-- `GET /api/cards/search?q=`
-- `POST /api/cards/import-scryfall`
-- `GET /api/collection`
-- `GET /api/collection/export?format=jsonl`
-- `POST /api/collection/copies`
-- `PATCH /api/collection/copies/{id}`
-- `DELETE /api/collection/copies/{id}`
-- `GET /api/locations`
-- `POST /api/locations`
-- `GET /api/decks`
-- `POST /api/decks`
-- `GET /api/decks/{id}`
-- `POST /api/decks/{id}/slots`
-- `DELETE /api/decks/{id}/slots/{slot_id}`
-- `GET /api/decks/{id}/status`
-- `POST /api/decks/{id}/import-list`
-- `GET /api/decks/{id}/export-list`
+Der ManaVault-Quellcode steht unter der [MIT-Lizenz](LICENSE).

@@ -11,3 +11,12 @@ data/
 *.db
 *.log
 *.tmp
+cardmarket-*.csv
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+scanner_samples/images/*
+!scanner_samples/images/.gitkeep
+scanner_samples/warps/
+scanner_samples/benchmark-results.json

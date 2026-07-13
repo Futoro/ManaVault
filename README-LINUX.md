@@ -18,7 +18,7 @@ Auf einem Raspberry Pi oder Linux-Server muss kein Browser gestartet werden. Man
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip unzip
 
-cd /home/pi/MagicVault
+cd /home/<user>/MagicVault
 chmod +x start-linux.sh import-scryfall-linux.sh install-linux-service.sh uninstall-linux-service.sh backup-linux.sh install-linux-backup-timer.sh
 sudo ./install-linux-service.sh
 ```
@@ -71,7 +71,7 @@ sudo apt install -y python3 python3-venv python3-pip
 Im Projektordner:
 
 ```bash
-cd /home/pi/MagicVault
+cd /home/<user>/MagicVault
 chmod +x start-linux.sh import-scryfall-linux.sh backup-linux.sh install-linux-backup-timer.sh
 ```
 
@@ -108,6 +108,22 @@ Das laedt Scryfall Bulk Data und importiert die Karten in:
 ```text
 data/manavault.sqlite3
 ```
+
+Der normale Import laedt anschliessend auch alle eigenstaendigen Tokens und Embleme. Wenn die normalen Kartendaten bereits vorhanden sind und nur die Token-Daten fehlen, genuegt der deutlich schnellere Befehl:
+
+```bash
+./import-scryfall-linux.sh --tokens-only
+```
+
+Dieser kurze Import aktualisiert auch die Beziehungen zwischen Deckkarten und den Tokens, die sie erzeugen. ManaVault zeigt daraus je Deck automatisch benoetigte und noch fehlende Token-Arten an.
+
+Deckbuilder und QR-Deckansicht zeigen ausserdem automatisch benoetigtes Zubehoer aus den Regeltexten an: normale Marker, Faehigkeitsmarker, Wuerfel und Spielhilfekarten. Dafuer ist kein weiterer Datenimport notwendig.
+
+## QR-Codes fuer Deckboxen
+
+In der Deckuebersicht und im Deckbuilder kann fuer jedes Deck ein QR-Code erstellt werden. Der Code verweist auf eine schreibgeschuetzte Deckansicht mit Kartenliste und allgemeinen Deckinformationen.
+
+ManaVault verwendet dabei die Adresse, ueber die es gerade geoeffnet wurde. Fuer ein von unterwegs erreichbares Etikett ManaVault daher vor dem Erstellen ueber die Tailscale-Adresse oeffnen.
 
 ## Optional: Port oder Host aendern
 
@@ -183,30 +199,47 @@ journalctl -u manavault -f
 Wenn du neue Projektdateien auf den Pi kopierst:
 
 ```bash
-cd /home/pi/MagicVault
+cd /home/<user>/MagicVault
 ./start-linux.sh
 ```
 
 Das Skript prueft die Abhaengigkeiten erneut und startet dann die App.
 
+### Live-Kartenscanner
+
+Der Live-Scanner verwendet RapidOCR/PP-OCR fuer Kameratext und Tesseract als Fallback. Einmalig beziehungsweise nach einem Scanner-Update ausfuehren:
+
+```bash
+cd /home/adrian/MagicVault
+chmod +x install-live-scanner-linux.sh
+sudo ./install-live-scanner-linux.sh
+```
+
+Fuer die Live-Kamera muss ManaVault ueber HTTPS aufgerufen werden. Im privaten Tailscale-Netz kann Port 8000 so bereitgestellt werden:
+
+```bash
+sudo tailscale serve --bg 8000
+```
+
 ## Backup
 
-Die wichtigste Datei ist:
+Fuer normale Sicherungen wird das kleine ManaVault-Datenbackup empfohlen. Es enthaelt Sammlung, Kopien und Decks, aber nicht den grossen Scryfall-Katalog. Nach einer Wiederherstellung kann Scryfall einfach neu importiert werden.
+
+In ManaVault gibt es dafuer den Bereich **Daten**:
+
+- **ManaVault-Daten Export** laedt ein kleines JSON-Backup herunter.
+- **ManaVault-Daten Import** stellt Sammlung und Decks wieder her.
+- **Vollbackup** exportiert/importiert die komplette SQLite-Datenbank inklusive Scryfall.
+
+Die komplette lokale Datenbank liegt unter:
 
 ```text
 data/manavault.sqlite3
 ```
 
-Diese Datei regelmaessig sichern. Sie enthaelt Sammlung, Decks, Orte und importierte Kartendaten.
+Diese Datei kann sehr gross werden, weil Scryfall-Daten enthalten sind.
 
-## Backup in der Weboberflaeche
-
-In ManaVault gibt es den Bereich **Backup**.
-
-- **Export** laedt eine komplette `.sqlite3`-Sicherung herunter.
-- **Import** spielt eine `.sqlite3`-Sicherung ein. Vor dem Ersetzen legt ManaVault automatisch ein Server-Backup unter `data/backups/` an.
-
-## Tägliches Autobackup mit pCloud
+## Taegliches Autobackup mit pCloud
 
 ManaVault nutzt fuer Cloud-Backups `rclone`. Einmalig auf dem Linux-Server installieren:
 
@@ -230,7 +263,7 @@ pcloud
 Dann im ManaVault-Ordner:
 
 ```bash
-cd /home/adrian/MagicVault
+cd /home/<user>/MagicVault
 chmod +x backup-linux.sh install-linux-backup-timer.sh
 sudo ./install-linux-backup-timer.sh
 ```

@@ -57,6 +57,10 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
+if [ -x "./install-linux-public-service.sh" ]; then
+  ./install-linux-public-service.sh
+fi
+
 echo
 echo "ManaVault laeuft jetzt als Server-Dienst."
 echo "Status:"

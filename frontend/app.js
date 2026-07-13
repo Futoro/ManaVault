@@ -1,25 +1,54 @@
 const state = {
   collection: [],
-  globalCards: [],
-  globalOffset: 0,
-  globalHasMore: true,
-  globalPageSize: 120,
   collectionOffset: 0,
   collectionHasMore: true,
   collectionPageSize: 120,
+  deckBuilderCards: [],
+  deckBuilderOffset: 0,
+  deckBuilderHasMore: true,
+  deckBuilderPageSize: 120,
   tagCatalog: [],
   setCatalog: [],
   planning: null,
   collectionStats: null,
   locations: [],
   decks: [],
+  deckVariants: [],
+  activeDeckVariantId: null,
+  deckEditDirty: false,
   selectedDeckId: null,
+  collectionActiveDeckId: null,
   activePage: "collectionPage",
   pendingCardId: null,
-  pendingDeleteLocationId: null,
+  pendingDeckId: null,
   importStatusTimer: null,
   importWasRunning: false,
   importStatusHideTimer: null,
+  deckBuilderSplit: 52,
+  scannerCard: null,
+  scannerResults: [],
+  scannerStream: null,
+  scannerTimer: null,
+  scannerChangeTimer: null,
+  scannerWatchdogTimer: null,
+  scannerBusy: false,
+  scannerCandidate: "",
+  scannerCandidateHits: 0,
+  scannerCandidateHistory: [],
+  scannerTorch: false,
+  scannerZoom: 1,
+  scannerZoomStep: 0.1,
+  scannerZoomTimer: null,
+  scannerPaused: false,
+  scannerFingerprint: null,
+  scannerLastAcceptedFingerprint: null,
+  scannerLastAcceptedPrint: "",
+  scannerStableFrames: 0,
+  scannerLastScanAt: 0,
+  scannerForceNext: false,
+  scannerWaitingForChange: false,
+  scannerLastReport: null,
+  quickAddBursts: new Map(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -119,12 +148,37 @@ function escapeHtml(value) {
   })[char]);
 }
 
+function countLabel(count, singular, plural) {
+  return `${count} ${Number(count) === 1 ? singular : plural}`;
+}
+
 function displayName(card) {
   return card.printed_name || card.name || card.card_name || "";
 }
 
 function displayType(card) {
   return card.printed_type_line || card.type_line || "";
+}
+
+function scannerPrintLabel(card) {
+  if (card.is_token) return tokenPrintIdentifier(card);
+  const base = `${String(card.set_code || "").toUpperCase()} #${card.collector_number || ""}`.trim();
+  const language = String(card.lang || "").toUpperCase();
+  return language && language !== "EN" ? `${base} ${language}` : base;
+}
+
+function tokenPrintIdentifier(card) {
+  const rawNumber = String(card.collector_number || "").toUpperCase();
+  const match = rawNumber.match(/^(\d+)(.*)$/);
+  const collectorNumber = match ? `${match[1].padStart(4, "0")}${match[2]}` : rawNumber;
+  return ["T", collectorNumber, String(card.set_code || "").toUpperCase(), String(card.lang || "").toUpperCase()]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function cardPrintSummary(card) {
+  if (card.is_token) return tokenPrintIdentifier(card);
+  return card.set_code ? `${String(card.set_code).toUpperCase()} #${card.collector_number || ""}` : "";
 }
 
 function oracleNameHint(card) {
@@ -141,17 +195,46 @@ function scheduleCollectionLoad() {
   loadCollection(true);
 }
 
+function scheduleDeckBuilderLoad() {
+  loadDeckBuilderCollection(true);
+}
+
 function selectedDeckId() {
-  const value = Number($("deckSelect").value);
+  const value = Number(state.selectedDeckId || $("deckSelect")?.value);
   return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function collectionTargetDeckId() {
+  const value = Number(state.collectionActiveDeckId || $("collectionActiveDeck")?.value);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function cardActionDeckId() {
+  return state.activePage === "deckBuilderPage" ? selectedDeckId() : collectionTargetDeckId();
 }
 
 async function init() {
   wireEvents();
+  loadAppVersion();
+  const sharedDeck = deckReferenceFromPublicPath();
+  if (sharedDeck) {
+    document.body.classList.add("public-deck-view");
+    await loadPublicDeck(sharedDeck);
+    return;
+  }
   await refreshBasics();
   await Promise.all([loadCollection(), loadDecks(), loadPlanning()]);
   await loadDeck();
   await refreshImportStatus();
+}
+
+async function loadAppVersion() {
+  try {
+    const result = await api("/api/version");
+    $("appVersion").textContent = `v${result.version}`;
+  } catch {
+    $("appVersion").hidden = true;
+  }
 }
 
 function wireEvents() {
@@ -161,13 +244,32 @@ function wireEvents() {
   });
 
   $("collectionSearch").addEventListener("input", () => debounce(scheduleCollectionLoad));
-  $("collectionSearchAllCards").addEventListener("change", () => loadCollection(true));
+  $("collectionSearchAllCards").addEventListener("change", () => {
+    updateCollectionScopeUi();
+    loadCollection(true);
+  });
   document.querySelectorAll(".collectionManaFilter").forEach((button) => {
     const color = button.dataset.color;
     button.innerHTML = `<img src="${MANA_SYMBOLS[color]}" alt="${color}">`;
     button.addEventListener("click", () => {
       button.classList.toggle("active");
       loadCollection(true);
+    });
+  });
+  document.querySelectorAll(".deckListManaFilter").forEach((button) => {
+    const color = button.dataset.color;
+    button.innerHTML = `<img src="${MANA_SYMBOLS[color]}" alt="${color}">`;
+    button.addEventListener("click", () => {
+      button.classList.toggle("active");
+      renderDeckList();
+    });
+  });
+  document.querySelectorAll(".deckBuilderManaFilter").forEach((button) => {
+    const color = button.dataset.color;
+    button.innerHTML = `<img src="${MANA_SYMBOLS[color]}" alt="${color}">`;
+    button.addEventListener("click", () => {
+      button.classList.toggle("active");
+      loadDeckBuilderCollection(true);
     });
   });
   $("collectionCmcMin").addEventListener("input", () => debounce(scheduleCollectionLoad));
@@ -177,10 +279,57 @@ function wireEvents() {
   $("collectionLegalFilter").addEventListener("change", () => loadCollection(true));
   $("collectionRarityFilter").addEventListener("change", () => loadCollection(true));
   $("collectionSetFilter").addEventListener("change", () => loadCollection(true));
+  $("collectionLangFilter").addEventListener("change", () => loadCollection(true));
   $("collectionMinPrice").addEventListener("input", () => debounce(scheduleCollectionLoad));
   $("collectionSort").addEventListener("change", () => loadCollection(true));
   $("exportCollection").addEventListener("click", exportCollection);
   $("collectionLoadMore").addEventListener("click", () => loadCollection(false));
+  $("openCardScanner").addEventListener("click", openCardScanner);
+  $("closeCardScanner").addEventListener("click", closeCardScanner);
+  $("startLiveScanner").addEventListener("click", startLiveScanner);
+  $("scanLiveCard").addEventListener("click", scanLiveCard);
+  $("scannerCameraSelect").addEventListener("change", changeScannerCamera);
+  $("toggleScannerTorch").addEventListener("click", toggleScannerTorch);
+  $("scannerZoom").addEventListener("input", (event) => scheduleScannerZoom(Number(event.target.value)));
+  $("scannerZoomOut").addEventListener("click", () => nudgeScannerZoom(-1));
+  $("scannerZoomIn").addEventListener("click", () => nudgeScannerZoom(1));
+  $("scannerDialog").addEventListener("close", stopLiveScanner);
+  $("scannerCapture").addEventListener("change", scanCapturedCard);
+  $("reportScannerIssue").addEventListener("click", reportScannerIssue);
+  $("scannerSearch").addEventListener("input", () => debounce(searchScannerCards, 300));
+  $("deckBuilderSearch").addEventListener("input", () => debounce(scheduleDeckBuilderLoad));
+  $("deckBuilderSearchAllCards").addEventListener("change", () => {
+    updateDeckBuilderScopeUi();
+    loadDeckBuilderCollection(true);
+  });
+  $("deckBuilderCmcMin").addEventListener("input", () => debounce(scheduleDeckBuilderLoad));
+  $("deckBuilderCmcMax").addEventListener("input", () => debounce(scheduleDeckBuilderLoad));
+  $("deckBuilderTypeFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderTagFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderLegalFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderRarityFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderSetFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderLangFilter").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderMinPrice").addEventListener("input", () => debounce(scheduleDeckBuilderLoad));
+  $("deckBuilderSort").addEventListener("change", () => loadDeckBuilderCollection(true));
+  $("deckBuilderLoadMore").addEventListener("click", () => loadDeckBuilderCollection(false));
+  $("clearDeckBuilderFilters").addEventListener("click", () => {
+    $("deckBuilderSearch").value = "";
+    $("deckBuilderCmcMin").value = "";
+    $("deckBuilderCmcMax").value = "";
+    $("deckBuilderTypeFilter").value = "";
+    $("deckBuilderTagFilter").value = "";
+    $("deckBuilderLegalFilter").value = "";
+    $("deckBuilderRarityFilter").value = "";
+    $("deckBuilderSetFilter").value = "";
+    $("deckBuilderLangFilter").value = "en,de";
+    $("deckBuilderMinPrice").value = "";
+    $("deckBuilderSort").value = "name";
+    $("deckBuilderSearchAllCards").checked = false;
+    updateDeckBuilderScopeUi();
+    document.querySelectorAll(".deckBuilderManaFilter").forEach((button) => button.classList.remove("active"));
+    loadDeckBuilderCollection(true);
+  });
   $("clearCollectionFilters").addEventListener("click", () => {
     $("collectionSearch").value = "";
     $("collectionCmcMin").value = "";
@@ -190,30 +339,63 @@ function wireEvents() {
     $("collectionLegalFilter").value = "";
     $("collectionRarityFilter").value = "";
     $("collectionSetFilter").value = "";
+    $("collectionLangFilter").value = "en,de";
     $("collectionMinPrice").value = "";
     $("collectionSort").value = "name";
     $("collectionSearchAllCards").checked = false;
+    updateCollectionScopeUi();
     document.querySelectorAll(".collectionManaFilter").forEach((button) => button.classList.remove("active"));
     loadCollection(true);
   });
+  $("deckSearch").addEventListener("input", () => debounce(renderDeckList));
+  $("deckFormatFilter").addEventListener("change", renderDeckList);
+  $("deckTypeFilter").addEventListener("change", renderDeckList);
+  $("deckSort").addEventListener("change", renderDeckList);
+  $("clearDeckFilters").addEventListener("click", () => {
+    $("deckSearch").value = "";
+    $("deckFormatFilter").value = "";
+    $("deckTypeFilter").value = "";
+    $("deckSort").value = "name";
+    document.querySelectorAll(".deckListManaFilter").forEach((button) => button.classList.remove("active"));
+    renderDeckList();
+  });
 
   $("deckSelect").addEventListener("change", async () => {
-    state.selectedDeckId = selectedDeckId();
+    state.selectedDeckId = selectedDeckIdFromElement("deckSelect");
+    renderDeckSelect();
+    if (state.activePage === "deckBuilderPage" && state.selectedDeckId) {
+      await api(`/api/decks/${state.selectedDeckId}/edit/begin`, { method: "POST" });
+    }
     await loadDeck();
+  });
+  $("collectionActiveDeck").addEventListener("change", async () => {
+    state.collectionActiveDeckId = selectedDeckIdFromElement("collectionActiveDeck");
+    renderDeckSelect();
+    renderCollection();
   });
 
   $("deckForm").addEventListener("submit", createDeckFromForm);
   $("openDeckBuilder").addEventListener("click", openDeckBuilder);
-  $("newDeckFromBuilder").addEventListener("click", createDeckQuick);
-  $("locationForm").addEventListener("submit", createLocation);
-  $("importDeck").addEventListener("click", importDeckList);
-  $("exportDeck").addEventListener("click", exportDeck);
-  $("refreshPlanning").addEventListener("click", loadPlanning);
-  $("refreshStats").addEventListener("click", loadCollectionStats);
+  $("deckQrButton").addEventListener("click", () => openDeckQr(selectedDeckId()));
+  $("backToDecks").addEventListener("click", () => showPage("decksPage"));
+  $("deckVariantSelect").addEventListener("change", activateSelectedDeckVariant);
+  $("saveDeckChanges").addEventListener("click", saveDeckChanges);
+  $("discardDeckChanges").addEventListener("click", discardDeckChanges);
+  $("saveDeckAsVariant").addEventListener("click", saveDeckAsVariant);
+  $("closeDeckQr").addEventListener("click", closeDeckQr);
+  $("printDeckQr").addEventListener("click", printDeckQr);
+  $("deckQrDialog").addEventListener("close", () => document.body.classList.remove("qr-printing"));
+  $("rotateDeckShare").addEventListener("click", rotateDeckShare);
+  $("revokeDeckShare").addEventListener("click", revokeDeckShare);
+  $("historySearch").addEventListener("input", () => debounce(loadHistory, 250));
+  $("historyAction").addEventListener("change", loadHistory);
+  $("downloadUserBackup").addEventListener("click", downloadUserBackup);
+  $("importUserBackup").addEventListener("click", importUserBackup);
   $("downloadBackup").addEventListener("click", downloadBackup);
   $("importBackup").addEventListener("click", importBackup);
 
   $("importScryfall").addEventListener("click", importScryfall);
+  setupDeckWorkbenchResize();
 }
 
 function setImportStatus(status) {
@@ -291,22 +473,964 @@ function setupStaticIconButtons() {
   setIconButton("importScryfall", "databaseImport", "Scryfall Import");
   setIconButton("exportCollection", "download", "Sammlung exportieren");
   setIconButton("openDeckBuilder", "deck", "Deckbuilder oeffnen");
-  setIconButton("newDeckFromBuilder", "newDeck", "Deck erstellen");
-  setIconButton("exportDeck", "download", "Deck exportieren");
-  setIconButton("importDeck", "upload", "Liste uebernehmen");
-  setIconButton("refreshPlanning", "refresh", "Aktualisieren");
-  setIconButton("refreshStats", "refresh", "Aktualisieren");
-  setIconButton("downloadBackup", "download", "Backup exportieren");
-  setIconButton("importBackup", "upload", "Backup importieren");
-  const scopeToggleIcon = document.querySelector(".scope-toggle-icon");
-  if (scopeToggleIcon) scopeToggleIcon.innerHTML = iconSvg("allCards");
+  setIconButton("deckQrButton", "qr", "QR-Code erstellen");
+  setIconButton("backToDecks", "back", "Zurueck zu Decks");
+  setIconButton("downloadUserBackup", "download", "Datenbackup exportieren");
+  setIconButton("importUserBackup", "upload", "Datenbackup importieren");
+  setIconButton("downloadBackup", "download", "Vollbackup exportieren");
+  setIconButton("importBackup", "upload", "Vollbackup importieren");
+  document.querySelectorAll(".scope-toggle-icon").forEach((icon) => {
+    icon.innerHTML = iconSvg("allCards");
+  });
+  updateCollectionScopeUi();
+  updateDeckBuilderScopeUi();
+}
+
+function openCardScanner() {
+  state.scannerCard = null;
+  $("scannerSearch").value = "";
+  $("scannerResults").innerHTML = "";
+  $("scannerChoice").hidden = true;
+  state.scannerLastReport = null;
+  $("reportScannerIssue").hidden = true;
+  $("scannerStatus").textContent = "";
+  $("scannerPreview").hidden = true;
+  $("scannerDialog").showModal();
+  startLiveScanner();
+}
+
+function closeCardScanner() {
+  stopLiveScanner();
+  $("scannerDialog").close();
+  if ($("scannerPreview").src) URL.revokeObjectURL($("scannerPreview").src);
+  $("scannerCapture").value = "";
+}
+
+async function startLiveScanner() {
+  stopLiveScanner();
+  state.scannerCandidate = "";
+  state.scannerCandidateHits = 0;
+  state.scannerCandidateHistory = [];
+  state.scannerCard = null;
+  $("scannerChoice").hidden = true;
+  $("scannerResults").innerHTML = "";
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    $("scannerStatus").textContent = "Live-Kamera benoetigt die Tailscale-HTTPS-Adresse. Foto oder Namenssuche sind weiterhin moeglich.";
+    $("startLiveScanner").hidden = false;
+    return;
+  }
+  try {
+    const savedCameraId = localStorage.getItem("manavault-scanner-camera") || "";
+    const videoConstraints = savedCameraId
+      ? { deviceId: { exact: savedCameraId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      : { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+    try {
+      state.scannerStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
+    } catch (cameraError) {
+      if (!savedCameraId) throw cameraError;
+      localStorage.removeItem("manavault-scanner-camera");
+      state.scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+    }
+    const video = $("scannerVideo");
+    video.srcObject = state.scannerStream;
+    await video.play();
+    updateScannerGuide();
+    const videoTrack = state.scannerStream.getVideoTracks()[0];
+    await configureScannerCameras(videoTrack);
+    const torchSupported = Boolean(videoTrack?.getCapabilities?.().torch);
+    $("toggleScannerTorch").hidden = !torchSupported;
+    $("toggleScannerTorch").textContent = "Licht einschalten";
+    state.scannerTorch = false;
+    configureScannerZoom(videoTrack);
+    $("scannerCamera").hidden = false;
+    $("startLiveScanner").hidden = true;
+    $("scanLiveCard").hidden = false;
+    $("scannerPreview").hidden = true;
+    resumeLiveScanner();
+  } catch (error) {
+    $("scannerStatus").textContent = error.name === "NotAllowedError"
+      ? "Kamerazugriff wurde nicht erlaubt. Bitte Browser-Berechtigung pruefen."
+      : `Live-Kamera konnte nicht gestartet werden: ${error.message}`;
+    $("startLiveScanner").hidden = false;
+  }
+}
+
+async function configureScannerCameras(activeTrack) {
+  const wrap = $("scannerCameraSelectWrap");
+  const select = $("scannerCameraSelect");
+  try {
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+    const activeId = activeTrack?.getSettings?.().deviceId || "";
+    select.innerHTML = devices.map((device, index) => (
+      `<option value="${escapeHtml(device.deviceId)}">${escapeHtml(device.label || `Kamera ${index + 1}`)}</option>`
+    )).join("");
+    if (activeId && devices.some((device) => device.deviceId === activeId)) select.value = activeId;
+    wrap.hidden = devices.length < 2;
+  } catch (_error) {
+    wrap.hidden = true;
+  }
+}
+
+function changeScannerCamera(event) {
+  const deviceId = event.target.value;
+  if (!deviceId) return;
+  localStorage.setItem("manavault-scanner-camera", deviceId);
+  $("scannerStatus").textContent = "Kamera wird gewechselt ...";
+  startLiveScanner();
+}
+
+async function toggleScannerTorch() {
+  const track = state.scannerStream?.getVideoTracks?.()[0];
+  if (!track?.getCapabilities?.().torch) return;
+  const next = !state.scannerTorch;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: next }] });
+    state.scannerTorch = next;
+    $("toggleScannerTorch").textContent = next ? "Licht ausschalten" : "Licht einschalten";
+    $("toggleScannerTorch").classList.toggle("active", next);
+  } catch (error) {
+    toast(`Licht konnte nicht geschaltet werden: ${error.message}`);
+  }
+}
+
+function configureScannerZoom(track) {
+  const capabilities = track?.getCapabilities?.();
+  const zoom = capabilities?.zoom;
+  const supported = zoom && Number.isFinite(Number(zoom.min)) && Number.isFinite(Number(zoom.max)) && Number(zoom.max) > Number(zoom.min);
+  const controls = $("scannerZoomControls");
+  controls.hidden = !supported;
+  if (!supported) return;
+  const slider = $("scannerZoom");
+  const settings = track.getSettings?.() || {};
+  const minimum = Number(zoom.min);
+  const maximum = Number(zoom.max);
+  const step = Number(zoom.step) > 0 ? Number(zoom.step) : 0.1;
+  const current = Math.min(maximum, Math.max(minimum, Number(settings.zoom) || minimum));
+  slider.min = String(minimum);
+  slider.max = String(maximum);
+  slider.step = String(step);
+  slider.value = String(current);
+  state.scannerZoom = current;
+  state.scannerZoomStep = step;
+  updateScannerZoomLabel(current);
+}
+
+function updateScannerZoomLabel(value) {
+  $("scannerZoomValue").textContent = `${Number(value).toLocaleString("de-CH", { maximumFractionDigits: 1 })}×`;
+}
+
+function scheduleScannerZoom(value) {
+  state.scannerZoom = value;
+  updateScannerZoomLabel(value);
+  clearTimeout(state.scannerZoomTimer);
+  state.scannerZoomTimer = setTimeout(() => applyScannerZoom(value), 80);
+}
+
+function nudgeScannerZoom(direction) {
+  const slider = $("scannerZoom");
+  const minimum = Number(slider.min);
+  const maximum = Number(slider.max);
+  const next = Math.min(maximum, Math.max(minimum, Number(slider.value) + direction * state.scannerZoomStep));
+  slider.value = String(next);
+  scheduleScannerZoom(next);
+}
+
+async function applyScannerZoom(value) {
+  const track = state.scannerStream?.getVideoTracks?.()[0];
+  if (!track || track.readyState === "ended") return;
+  try {
+    await track.applyConstraints({ advanced: [{ zoom: value }] });
+    const applied = Number(track.getSettings?.().zoom);
+    if (Number.isFinite(applied)) {
+      state.scannerZoom = applied;
+      $("scannerZoom").value = String(applied);
+      updateScannerZoomLabel(applied);
+    }
+  } catch (error) {
+    toast(`Zoom konnte nicht eingestellt werden: ${error.message}`);
+  }
+}
+
+function stopLiveScanner() {
+  pauseLiveScanner();
+  clearTimeout(state.scannerZoomTimer);
+  state.scannerZoomTimer = null;
+  state.scannerTorch = false;
+  state.scannerZoom = 1;
+  state.scannerFingerprint = null;
+  state.scannerLastAcceptedFingerprint = null;
+  state.scannerLastAcceptedPrint = "";
+  state.scannerStableFrames = 0;
+  state.scannerLastScanAt = 0;
+  state.scannerForceNext = false;
+  state.scannerWaitingForChange = false;
+  state.scannerStream?.getTracks().forEach((track) => track.stop());
+  state.scannerStream = null;
+  if ($("scannerVideo")) $("scannerVideo").srcObject = null;
+  if ($("scannerCamera")) $("scannerCamera").hidden = true;
+  if ($("scannerCameraSelectWrap")) $("scannerCameraSelectWrap").hidden = true;
+  if ($("scannerOcrDebug")) $("scannerOcrDebug").hidden = true;
+  if ($("startLiveScanner")) $("startLiveScanner").hidden = false;
+  if ($("scanLiveCard")) {
+    $("scanLiveCard").hidden = true;
+    $("scanLiveCard").disabled = false;
+    $("scanLiveCard").textContent = "Karte jetzt scannen";
+  }
+  if ($("toggleScannerTorch")) {
+    $("toggleScannerTorch").hidden = true;
+    $("toggleScannerTorch").classList.remove("active");
+    $("toggleScannerTorch").textContent = "Licht einschalten";
+  }
+  if ($("scannerZoomControls")) $("scannerZoomControls").hidden = true;
+}
+
+function pauseLiveScanner() {
+  clearTimeout(state.scannerTimer);
+  clearInterval(state.scannerTimer);
+  clearInterval(state.scannerChangeTimer);
+  clearInterval(state.scannerWatchdogTimer);
+  state.scannerTimer = null;
+  state.scannerChangeTimer = null;
+  state.scannerWatchdogTimer = null;
+  state.scannerPaused = true;
+}
+
+function resumeLiveScanner() {
+  if (!state.scannerStream) return startLiveScanner();
+  clearTimeout(state.scannerTimer);
+  clearInterval(state.scannerTimer);
+  clearInterval(state.scannerChangeTimer);
+  clearInterval(state.scannerWatchdogTimer);
+  state.scannerCandidate = "";
+  state.scannerCandidateHits = 0;
+  state.scannerCandidateHistory = [];
+  state.scannerBusy = false;
+  state.scannerPaused = false;
+  state.scannerFingerprint = null;
+  state.scannerStableFrames = 0;
+  state.scannerWaitingForChange = Boolean(state.scannerLastAcceptedFingerprint);
+  $("scannerCamera").hidden = false;
+  $("startLiveScanner").hidden = true;
+  $("scanLiveCard").hidden = false;
+  $("scanLiveCard").disabled = false;
+  $("scanLiveCard").textContent = "Karte jetzt scannen";
+  $("scannerStatus").textContent = "Scanner aktiv.";
+  updateScannerGuide();
+  state.scannerChangeTimer = setInterval(monitorScannerCard, 150);
+  state.scannerWatchdogTimer = setInterval(scannerWatchdogTick, 5000);
+  if (!state.scannerWaitingForChange) scheduleAutomaticScanner(100);
+}
+
+function scheduleAutomaticScanner(delay = 60) {
+  clearTimeout(state.scannerTimer);
+  if (state.scannerPaused || !state.scannerStream) return;
+  state.scannerTimer = setTimeout(automaticScannerTick, delay);
+}
+
+function automaticScannerTick() {
+  if (state.scannerPaused || state.scannerWaitingForChange || !state.scannerStream) return;
+  if (state.scannerBusy) {
+    scheduleAutomaticScanner(60);
+    return;
+  }
+  const video = $("scannerVideo");
+  if (video.readyState < 2) {
+    scheduleAutomaticScanner(100);
+    return;
+  }
+  state.scannerLastScanAt = Date.now();
+  const force = state.scannerForceNext;
+  state.scannerForceNext = false;
+  captureLiveScannerFrame(true, scannerFrameFingerprint(), force);
+}
+
+function scannerFrameFingerprint() {
+  const video = $("scannerVideo");
+  if (!video.videoWidth || !video.videoHeight || video.readyState < 2) return null;
+  const card = scannerCardGeometry(video.videoWidth, video.videoHeight);
+  const canvas = document.createElement("canvas");
+  canvas.width = 24;
+  canvas.height = 32;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(video, card.x, card.y, card.width, card.height, 0, 0, canvas.width, canvas.height);
+  const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const gray = [];
+  for (let index = 0; index < rgba.length; index += 4) {
+    gray.push(rgba[index] * 0.299 + rgba[index + 1] * 0.587 + rgba[index + 2] * 0.114);
+  }
+  const mean = gray.reduce((sum, value) => sum + value, 0) / gray.length;
+  const variance = gray.reduce((sum, value) => sum + (value - mean) ** 2, 0) / gray.length;
+  const deviation = Math.max(20, Math.sqrt(variance));
+  return gray.map((value) => Math.max(0, Math.min(255, 128 + (value - mean) * 32 / deviation)));
+}
+
+function scannerFingerprintDifference(first, second) {
+  if (!first || !second || first.length !== second.length) return Infinity;
+  return first.reduce((sum, value, index) => sum + Math.abs(value - second[index]), 0) / first.length;
+}
+
+function monitorScannerCard() {
+  if (!state.scannerWaitingForChange || state.scannerBusy || state.scannerPaused || !state.scannerStream) return;
+  const fingerprint = scannerFrameFingerprint();
+  if (!fingerprint) return;
+  const movement = scannerFingerprintDifference(fingerprint, state.scannerFingerprint);
+  if (movement < 3.5) {
+    state.scannerStableFrames += 1;
+  } else {
+    state.scannerFingerprint = fingerprint;
+    state.scannerStableFrames = 0;
+  }
+  const changed = scannerFingerprintDifference(fingerprint, state.scannerLastAcceptedFingerprint) > 9;
+  if (state.scannerStableFrames >= 2 && changed) {
+    state.scannerWaitingForChange = false;
+    state.scannerLastScanAt = Date.now();
+    scheduleAutomaticScanner(0);
+  }
+}
+
+function scannerWatchdogTick() {
+  if (!state.scannerWaitingForChange || state.scannerBusy || state.scannerPaused || !state.scannerStream) return;
+  state.scannerWaitingForChange = false;
+  scheduleAutomaticScanner(0);
+}
+
+function scannerCardGeometry(frameWidth, frameHeight) {
+  let width = frameWidth * 0.7;
+  let height = width / 0.716;
+  if (height > frameHeight * 0.9) {
+    height = frameHeight * 0.9;
+    width = height * 0.716;
+  }
+  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+}
+
+function updateScannerGuide() {
+  const video = $("scannerVideo");
+  const guide = document.querySelector(".scanner-card-guide");
+  if (!video.videoWidth || !video.videoHeight || !guide) return;
+  const card = scannerCardGeometry(video.videoWidth, video.videoHeight);
+  guide.style.left = `${card.x / video.videoWidth * 100}%`;
+  guide.style.top = `${card.y / video.videoHeight * 100}%`;
+  guide.style.width = `${card.width / video.videoWidth * 100}%`;
+  guide.style.height = `${card.height / video.videoHeight * 100}%`;
+}
+
+function scannerRegionCrop(source, region, isFullCard = false) {
+  const canvas = document.createElement("canvas");
+  const frameWidth = isFullCard ? source.width : source.videoWidth;
+  const frameHeight = isFullCard ? source.height : source.videoHeight;
+  const card = isFullCard ? { x: 0, y: 0, width: frameWidth, height: frameHeight } : scannerCardGeometry(frameWidth, frameHeight);
+  const x = card.x + card.width * region.x;
+  const y = card.y + card.height * region.y;
+  const width = card.width * region.width;
+  const height = card.height * region.height;
+  canvas.width = Math.min(1600, Math.max(900, Math.round(width * 2)));
+  canvas.height = Math.max(60, Math.round(canvas.width * height / width));
+  canvas.getContext("2d").drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.92);
+}
+
+function scannerCrops(source, isFullCard = false) {
+  return {
+    nameData: scannerRegionCrop(source, { x: 0.045, y: 0.035, width: 0.87, height: 0.08 }, isFullCard),
+    collectorData: scannerRegionCrop(source, { x: 0.02, y: 0.935, width: 0.23, height: 0.055 }, isFullCard),
+    collectorWideData: scannerRegionCrop(source, { x: 0.02, y: 0.92, width: 0.55, height: 0.075 }, isFullCard),
+  };
+}
+
+function scannerFullFrame(source, isFullCard = false) {
+  const sourceWidth = isFullCard ? source.width : source.videoWidth;
+  const sourceHeight = isFullCard ? source.height : source.videoHeight;
+  const scale = Math.min(1, 1400 / Math.max(sourceWidth, sourceHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+  canvas.getContext("2d").drawImage(source, 0, 0, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.86);
+}
+
+async function scanLiveCard() {
+  const button = $("scanLiveCard");
+  if (!state.scannerStream) return;
+  if (state.scannerPaused) return;
+  if (state.scannerBusy) {
+    state.scannerForceNext = true;
+    button.textContent = "Direkter Scan vorgemerkt";
+    return;
+  }
+  state.scannerWaitingForChange = false;
+  clearTimeout(state.scannerTimer);
+  button.disabled = true;
+  button.textContent = "Karte wird erkannt ...";
+  $("scannerStatus").textContent = "Kartenkontur, Name und Druckkennung werden gelesen ...";
+  try {
+    state.scannerLastScanAt = Date.now();
+    await captureLiveScannerFrame(true, scannerFrameFingerprint(), true);
+  } finally {
+    if (!state.scannerCard && state.scannerStream) {
+      button.disabled = false;
+      button.textContent = "Erneut scannen";
+    }
+  }
+}
+
+async function captureLiveScannerFrame(immediate = false, fingerprint = null, force = false) {
+  const video = $("scannerVideo");
+  if (state.scannerBusy || state.scannerPaused || !state.scannerStream || video.readyState < 2) return;
+  state.scannerBusy = true;
+  let fullImageData = null;
+  if (force) {
+    $("scanLiveCard").disabled = true;
+    $("scanLiveCard").textContent = "Karte wird erkannt ...";
+  }
+  try {
+    const crops = scannerCrops(video);
+    fullImageData = scannerFullFrame(video);
+    const result = await recognizeScannerImage(crops, true, fullImageData);
+    rememberScannerReport(fullImageData, result);
+    if (result.debug_collector_image) {
+      $("scannerOcrPreview").src = result.debug_collector_image;
+      $("scannerOcrWidePreview").src = result.debug_name_image || result.debug_collector_image;
+      $("scannerOcrDebug").hidden = false;
+    }
+    handleScannerRecognition(result, immediate, fingerprint, force);
+  } catch (error) {
+    if (fullImageData) rememberScannerReport(fullImageData, { error: error.message, cards: [] });
+    $("scannerStatus").textContent = error.message;
+    if (/nicht installiert|Sprachdaten fehlen/i.test(error.message)) stopLiveScanner();
+  } finally {
+    state.scannerBusy = false;
+    if (force && !state.scannerPaused && state.scannerStream) {
+      $("scanLiveCard").disabled = false;
+      $("scanLiveCard").textContent = "Karte jetzt scannen";
+    }
+    if (!state.scannerPaused && !state.scannerWaitingForChange && state.scannerStream) {
+      scheduleAutomaticScanner(state.scannerForceNext ? 0 : 60);
+    }
+  }
+}
+
+function rememberScannerReport(imageData, result) {
+  state.scannerLastReport = {
+    image_data: imageData,
+    result: {
+      recognized_text: result.recognized_text || "",
+      collector_text: result.collector_text || "",
+      name_text: result.name_text || "",
+      match_type: result.match_type || "none",
+      ocr_engine: result.ocr_engine || "",
+      ocr_score: Number(result.ocr_score || 0),
+      card_detected: Boolean(result.card_detected),
+      card_detection_score: Number(result.card_detection_score || 0),
+      error: result.error || "",
+      cards: (result.cards || []).slice(0, 8).map((card) => ({
+        id: card.id,
+        name: card.name,
+        printed_name: card.printed_name,
+        set_code: card.set_code,
+        collector_number: card.collector_number,
+        lang: card.lang,
+      })),
+    },
+  };
+  $("reportScannerIssue").hidden = false;
+  $("reportScannerIssue").textContent = "Fehlscan speichern";
+}
+
+async function reportScannerIssue(event) {
+  const report = state.scannerLastReport;
+  if (!report) return;
+  const expected = window.prompt("Welche Karte oder Druckkennung waere richtig? (optional)", "");
+  if (expected === null) return;
+  await withActionButton(event, async () => {
+    const saved = await api("/api/cards/scan-reports", {
+      method: "POST",
+      body: JSON.stringify({ ...report, expected }),
+    });
+    $("reportScannerIssue").textContent = "Fehlscan gespeichert";
+    toast(`Scanner-Report ${saved.report_id} gespeichert.`);
+  }).catch((error) => toast(error.message));
+}
+
+async function recognizeScannerImage(crops, live = false, fullImageData = null) {
+  return api("/api/cards/scan-frame", {
+    method: "POST",
+    body: JSON.stringify({
+      image_data: crops.nameData,
+      collector_data: crops.collectorData,
+      collector_wide_data: crops.collectorWideData,
+      full_image_data: fullImageData,
+      live,
+    }),
+  });
+}
+
+function handleScannerRecognition(result, immediate = false, fingerprint = null, force = false) {
+  const cards = result.cards || [];
+  if (result.match_type !== "collector" || !cards[0]) {
+    return;
+  }
+  const possiblePrints = new Set(cards.map((card) => `${card.set_code}:${card.collector_number}:${card.lang}`));
+  const recognizedPrint = possiblePrints.size === 1 ? [...possiblePrints][0] : "";
+  if (immediate) {
+    const selectedPrint = state.scannerCard
+      ? `${state.scannerCard.set_code}:${state.scannerCard.collector_number}:${state.scannerCard.lang}`
+      : "";
+    if (!recognizedPrint) {
+      if (selectedPrint && possiblePrints.has(selectedPrint)) return;
+      state.scannerCard = null;
+      $("scannerChoice").hidden = true;
+      $("scannerStatus").textContent = "Mehrere passende Drucke gefunden - bitte auswaehlen.";
+      renderScannerResults(cards);
+      return;
+    }
+    if (recognizedPrint === selectedPrint) {
+      state.scannerLastAcceptedFingerprint = fingerprint || scannerFrameFingerprint();
+      state.scannerWaitingForChange = true;
+      return;
+    }
+    state.scannerLastAcceptedFingerprint = fingerprint || scannerFrameFingerprint();
+    state.scannerLastAcceptedPrint = recognizedPrint;
+    state.scannerWaitingForChange = true;
+    $("scannerSearch").value = displayName(cards[0]);
+    $("scannerStatus").textContent = `${displayName(cards[0])} - ${scannerPrintLabel(cards[0])} erkannt.`;
+    renderScannerResults(cards);
+    selectScannedCard(0);
+    return;
+  }
+  const candidate = String(cards[0].id);
+  state.scannerCandidateHistory.push(candidate);
+  state.scannerCandidateHistory = state.scannerCandidateHistory.slice(-6);
+  const hits = state.scannerCandidateHistory.filter((item) => item === candidate).length;
+  const instantMatch = String(result.ocr_engine || "").startsWith("rapidocr") && Number(result.ocr_score || 0) >= 0.70 && possiblePrints.size === 1;
+  const requiredHits = instantMatch ? 1 : 2;
+  $("scannerStatus").textContent = `Druckkennung erkannt (${hits}/${requiredHits}) ...`;
+  if (hits >= requiredHits) {
+    pauseLiveScanner();
+    $("scannerSearch").value = displayName(cards[0]);
+    $("scannerStatus").textContent = possiblePrints.size > 1
+      ? "Kennung ist zwischen mehreren echten Set-Codes mehrdeutig. Bitte Druck auswaehlen."
+      : `${displayName(cards[0])} - ${scannerPrintLabel(cards[0])} eindeutig erkannt.`;
+    renderScannerResults(cards);
+  }
+}
+
+async function scanCapturedCard() {
+  const file = $("scannerCapture").files?.[0];
+  if (!file) return;
+  if ($("scannerPreview").src) URL.revokeObjectURL($("scannerPreview").src);
+  $("scannerPreview").src = URL.createObjectURL(file);
+  $("scannerPreview").hidden = false;
+  stopLiveScanner();
+  $("scannerStatus").textContent = "Kartenname wird gelesen ...";
+  try {
+    const bitmap = await createImageBitmap(file);
+    const crops = scannerCrops(bitmap, true);
+    $("scannerOcrPreview").src = crops.collectorData;
+    $("scannerOcrWidePreview").src = crops.collectorWideData;
+    $("scannerOcrDebug").hidden = false;
+    const result = await recognizeScannerImage(crops, false, scannerFullFrame(bitmap, true));
+    bitmap.close();
+    const cards = result.cards || [];
+    $("scannerSearch").value = cards[0] ? displayName(cards[0]) : "";
+    $("scannerStatus").textContent = cards.length
+      ? `${result.match_type === "collector" ? "Druck eindeutig erkannt" : "Name erkannt"}: ${displayName(cards[0])}`
+      : `Keine sichere Zuordnung. OCR: ${result.collector_text || result.recognized_text || "kein Text"}`;
+    renderScannerResults(cards);
+  } catch (error) {
+    $("scannerStatus").textContent = `${error.message} Bitte Kartenname eingeben.`;
+    $("scannerSearch").focus();
+  }
+}
+
+function renderScannerResults(cards) {
+  state.scannerResults = cards;
+  $("scannerResults").innerHTML = cards.length ? cards.map((card, index) => `
+    <button class="scanner-result" type="button" onclick="selectScannedCard(${index})">
+      ${card.image_url ? `<img src="${escapeHtml(card.image_url)}" alt="">` : ""}
+      <span><strong>${escapeHtml(displayName(card))}</strong><small>${escapeHtml(scannerPrintLabel(card))}</small></span>
+    </button>
+  `).join("") : emptyState("Keine passende Karte gefunden.");
+}
+
+async function searchScannerCards() {
+  const query = $("scannerSearch").value.trim();
+  if (query.length < 2) {
+    $("scannerResults").innerHTML = "";
+    return;
+  }
+  try {
+    const cards = await api(`/api/cards/search?q=${encodeURIComponent(query)}&langs=en,de&sort=name&limit=8`);
+    renderScannerResults(cards);
+  } catch (error) {
+    $("scannerStatus").textContent = error.message;
+  }
+}
+
+function selectScannedCard(index) {
+  const card = state.scannerResults[index];
+  if (!card) return;
+  state.scannerCard = card;
+  state.scannerLastAcceptedPrint = `${card.set_code}:${card.collector_number}:${card.lang}`;
+  $("scanLiveCard").hidden = false;
+  $("scanLiveCard").disabled = state.scannerBusy;
+  $("scanLiveCard").textContent = state.scannerBusy ? "Karte wird erkannt ..." : "Karte jetzt scannen";
+  $("scannerResults").innerHTML = "";
+  $("scannerChoice").hidden = false;
+  $("scannerChoice").innerHTML = `
+    <div class="scanner-selected">
+      ${card.image_url ? `<img src="${escapeHtml(card.image_url)}" alt="">` : ""}
+      <div><strong>${escapeHtml(displayName(card))}</strong><small>${escapeHtml(scannerPrintLabel(card))}</small></div>
+    </div>
+    <div class="quantity-stepper">
+      <button class="secondary" type="button" onclick="changeScannerQuantity(-1)" aria-label="Menge verringern">&minus;</button>
+      <output id="scannerQuantity">1</output>
+      <button class="secondary" type="button" onclick="changeScannerQuantity(1)" aria-label="Menge erhoehen">+</button>
+    </div>
+    <button type="button" onclick="confirmScannedCard(event)">Zur Sammlung hinzufuegen</button>
+    <button class="secondary" type="button" onclick="scannerChooseAgain()">Anderen Druck waehlen</button>`;
+}
+
+function safeScannerScroll(elementId) {
+  const element = $(elementId);
+  if (!element) return;
+  try {
+    element.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (_error) {
+    element.scrollIntoView();
+  }
+}
+
+function changeScannerQuantity(delta) {
+  const output = $("scannerQuantity");
+  output.textContent = String(Math.max(1, Math.min(100, Number(output.textContent) + delta)));
+}
+
+function scannerChooseAgain() {
+  state.scannerCard = null;
+  $("scannerChoice").hidden = true;
+  $("scannerResults").innerHTML = "";
+  state.scannerStream ? resumeLiveScanner() : startLiveScanner();
+}
+
+async function confirmScannedCard(event) {
+  if (!state.scannerCard) return;
+  await withActionButton(event, async () => {
+    const selectedCard = state.scannerCard;
+    const quantity = Number($("scannerQuantity").textContent) || 1;
+    pauseLiveScanner();
+    await api("/api/collection/copies/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        card_id: selectedCard.id,
+        quantity,
+        language: selectedCard.lang || "en",
+        location_id: defaultCollectionLocationId(),
+      }),
+    });
+    toast(`${quantity}x ${displayName(selectedCard)} hinzugefuegt.`);
+    state.scannerCard = null;
+    $("scannerChoice").hidden = true;
+    $("scannerResults").innerHTML = "";
+    $("scannerSearch").value = "";
+    resumeLiveScanner();
+    Promise.all([loadCollection(true), loadCollectionStats()]).catch((error) => toast(error.message));
+  }).catch((error) => {
+    toast(error.message);
+    if (state.scannerStream) {
+      resumeLiveScanner();
+      $("scanLiveCard").hidden = false;
+      $("scanLiveCard").disabled = false;
+      $("scanLiveCard").textContent = "Karte jetzt scannen";
+    }
+  });
+}
+
+function updateCollectionScopeUi() {
+  const toggle = $("collectionSearchAllCards");
+  const label = $("collectionScopeLabel");
+  const wrap = document.querySelector(".search-scope-wrap");
+  const isGlobal = Boolean(toggle?.checked);
+  if (label) label.textContent = isGlobal ? "Scryfall" : "Sammlung";
+  if (wrap) wrap.classList.toggle("global-mode", isGlobal);
+}
+
+function updateDeckBuilderScopeUi() {
+  const toggle = $("deckBuilderSearchAllCards");
+  const label = $("deckBuilderScopeLabel");
+  const wrap = document.querySelector(".builder-search-wrap");
+  const isGlobal = Boolean(toggle?.checked);
+  if (label) label.textContent = isGlobal ? "Scryfall" : "Sammlung";
+  if (wrap) wrap.classList.toggle("global-mode", isGlobal);
 }
 
 function showPage(pageId) {
   state.activePage = pageId;
   document.querySelectorAll(".page").forEach((page) => page.classList.toggle("active", page.id === pageId));
-  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.page === pageId));
-  if (pageId === "statsPage") loadCollectionStats();
+  const activeTabPage = pageId === "deckBuilderPage" ? "decksPage" : pageId;
+  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.page === activeTabPage));
+  if (pageId === "statsPage") {
+    $("collectionStats").innerHTML = `<div class="empty">Lade...</div>`;
+    loadCollectionStats().catch((error) => {
+      $("collectionStats").innerHTML = emptyState(error.message);
+    });
+  }
+  if (pageId === "planningPage") loadPlanning();
+  if (pageId === "historyPage") loadHistory();
+}
+
+function deckReferenceFromPublicPath() {
+  const privateMatch = window.location.pathname.match(/^\/deck\/(\d+)\/?$/);
+  if (privateMatch) return { type: "internal", value: Number(privateMatch[1]) };
+  const shareMatch = window.location.pathname.match(/^\/share\/([A-Za-z0-9_-]{20,128})\/?$/);
+  return shareMatch ? { type: "share", value: shareMatch[1] } : null;
+}
+
+async function loadPublicDeck(reference) {
+  showPage("publicDeckPage");
+  const content = $("publicDeckContent");
+  try {
+    let detail;
+    let status;
+    let overview;
+    const isExternalShare = reference.type === "share";
+    if (isExternalShare) {
+      const shared = await api(`/api/public/decks/${encodeURIComponent(reference.value)}`);
+      detail = { deck: shared.deck, slots: shared.cards || [] };
+      status = { cards: [], required_tokens: shared.required_tokens || [], accessories: shared.accessories || [] };
+      overview = shared.overview || shared.deck;
+    } else {
+      const deckId = reference.value;
+      const [internalDetail, internalStatus, decks] = await Promise.all([
+        api(`/api/decks/${deckId}`),
+        api(`/api/decks/${deckId}/status`),
+        api("/api/decks"),
+      ]);
+      detail = internalDetail;
+      status = internalStatus;
+      overview = decks.find((deck) => Number(deck.id) === Number(deckId)) || detail.deck;
+    }
+    const cards = detail.slots.filter((slot) => !slot.is_token && slot.zone !== "sideboard");
+    const sideboard = detail.slots.filter((slot) => !slot.is_token && slot.zone === "sideboard");
+    const tokens = detail.slots.filter((slot) => slot.is_token);
+    const cardCount = cards.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+    const sideboardCount = sideboard.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+    const tokenCount = tokens.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+    const originalCount = status.cards.reduce((sum, item) => sum + Number(item.owned || 0), 0);
+    const proxyCount = status.cards.reduce((sum, item) => sum + Number(item.proxy || 0), 0);
+    const missingCount = status.cards.reduce((sum, item) => sum + Number(item.missing || 0), 0);
+    document.title = `${detail.deck.name} - ManaVault`;
+    content.innerHTML = `
+      <header class="public-deck-hero${overview.commander_image_url ? "" : " no-cover"}">
+        ${overview.commander_image_url ? `<img src="${escapeHtml(overview.commander_image_url)}" alt="">` : ""}
+        <div>
+          <span class="public-deck-kicker">ManaVault Deck</span>
+          <h2>${escapeHtml(detail.deck.name)}</h2>
+          <p>${escapeHtml(detail.deck.format || "Ohne Format")}</p>
+          <div class="public-deck-colors">
+            ${(overview.colors || []).map((color) => `<img src="${MANA_SYMBOLS[color]}" alt="${color}">`).join("")}
+          </div>
+        </div>
+      </header>
+      <div class="public-deck-metrics">
+        <span><strong>${cardCount}</strong><small>Karten</small></span>
+        <span><strong>${sideboardCount}</strong><small>Sideboard</small></span>
+        <span><strong>${tokenCount}</strong><small>Tokens</small></span>
+        ${isExternalShare ? "" : `
+          <span><strong>${originalCount}</strong><small>Originale</small></span>
+          <span><strong>${proxyCount}</strong><small>Proxys</small></span>
+          <span class="${missingCount ? "is-warning" : ""}"><strong>${missingCount}</strong><small>Fehlend</small></span>
+        `}
+        <span><strong>${formatEuro(overview.deck_list_value_eur || 0)}</strong><small>Deckwert</small></span>
+      </div>
+      ${detail.deck.notes ? `<section class="public-deck-notes"><h3>Notizen</h3><p>${escapeHtml(detail.deck.notes)}</p></section>` : ""}
+      <section class="public-deck-section">
+        <div class="public-deck-section-head"><h3>Deckkarten</h3></div>
+        <div class="public-deck-grid">${cards.map(publicDeckCard).join("") || emptyState("Keine Deckkarten eingetragen.")}</div>
+      </section>
+      ${sideboard.length ? `
+        <section class="public-deck-section">
+          <div class="public-deck-section-head"><h3>Sideboard</h3><span>${sideboardCount}</span></div>
+          <div class="public-deck-grid">${sideboard.map(publicDeckCard).join("")}</div>
+        </section>` : ""}
+      ${publicRequiredTokensBlock(status.required_tokens || [])}
+      ${accessoriesBlock(status.accessories || [], true)}
+      ${tokens.length ? `
+        <section class="public-deck-section public-token-section">
+          <div class="public-deck-section-head"><h3>Tokens</h3><span>${tokenCount}</span></div>
+          <div class="public-deck-grid">${tokens.map(publicDeckCard).join("")}</div>
+        </section>` : ""}
+    `;
+  } catch (error) {
+    content.innerHTML = emptyState(error.message || "Deck konnte nicht geladen werden.");
+  }
+}
+
+function publicRequiredTokensBlock(tokens) {
+  if (!tokens.length) return "";
+  const missingCount = tokens.filter((token) => token.missing > 0).length;
+  return `
+    <section class="public-deck-section public-required-tokens">
+      <div class="public-deck-section-head">
+        <div><h3>Benötigte Tokens</h3></div>
+        <span class="${missingCount ? "is-missing" : ""}">${missingCount ? `${missingCount} offen` : "Vollständig"}</span>
+      </div>
+      <div class="public-required-token-grid">
+        ${tokens.map((token) => `
+          <article>
+            ${token.image_url ? `<img src="${escapeHtml(token.image_url)}" alt="">` : ""}
+            <div>
+              <strong>${escapeHtml(token.name)}</strong>
+              <small>${escapeHtml(tokenPrintIdentifier(token))}</small>
+              <small>Erzeugt durch: ${token.source_names.map(escapeHtml).join(", ")}</small>
+            </div>
+            <span class="${token.missing ? "bad" : token.proxies ? "warn" : "good"}">${token.missing ? "Noch benötigt" : token.proxies ? "Proxy" : "Vorhanden"}</span>
+          </article>`).join("")}
+      </div>
+    </section>`;
+}
+
+function publicDeckCard(slot) {
+  return `
+    <article class="public-deck-card${slot.is_token ? " public-token-card" : ""}">
+      <div class="public-deck-card-image">
+        ${slot.image_url ? `<img src="${escapeHtml(slot.image_url)}" alt="">` : `<span>${escapeHtml(slot.name)}</span>`}
+        <strong>${slot.quantity}x</strong>
+      </div>
+      <div>
+        <strong>${escapeHtml(slot.name)}</strong>
+        <span class="mana-cost">${manaCostHtml(slot.mana_cost || "")}</span>
+        <small>${escapeHtml(slot.type_line || "")}</small>
+      </div>
+    </article>`;
+}
+
+async function openDeckQr(deckId) {
+  if (!deckId) {
+    toast("Bitte zuerst ein Deck auswaehlen.");
+    return;
+  }
+  let deck = state.decks.find((item) => Number(item.id) === Number(deckId));
+  if (!deck) {
+    const detail = await api(`/api/decks/${deckId}`);
+    deck = detail.deck;
+  }
+  let share;
+  try {
+    share = await api(`/api/decks/${deckId}/share`, { method: "POST" });
+  } catch (error) {
+    toast(error.message || "Oeffentliche Adresse noch nicht eingerichtet.");
+    return;
+  }
+  const publicUrl = share.url;
+  const qrEndpoint = `/api/decks/${deckId}/qr`;
+  $("deckQrTitle").textContent = `QR-Code fuer ${deck.name}`;
+  $("deckQrLabelName").textContent = deck.name;
+  $("deckQrUrl").textContent = publicUrl;
+  $("deckQrImage").src = qrEndpoint;
+  $("downloadDeckQr").href = `${qrEndpoint}?download=true`;
+  $("deckQrDialog").dataset.deckId = String(deckId);
+  $("deckQrDialog").showModal();
+}
+
+async function rotateDeckShare() {
+  const deckId = Number($("deckQrDialog").dataset.deckId || 0);
+  if (!deckId || !window.confirm("Der bisherige QR-Code funktioniert danach nicht mehr. Neuen Link erzeugen?")) return;
+  try {
+    const share = await api(`/api/decks/${deckId}/share/rotate`, { method: "POST" });
+    if (!share.url) throw new Error("Oeffentliche Adresse noch nicht eingerichtet.");
+    const qrEndpoint = `/api/decks/${deckId}/qr?t=${Date.now()}`;
+    $("deckQrUrl").textContent = share.url;
+    $("deckQrImage").src = qrEndpoint;
+    $("downloadDeckQr").href = `${qrEndpoint}&download=true`;
+    toast("Neuer Freigabelink erstellt.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function revokeDeckShare() {
+  const deckId = Number($("deckQrDialog").dataset.deckId || 0);
+  if (!deckId || !window.confirm("Diesen Freigabelink deaktivieren?")) return;
+  try {
+    await api(`/api/decks/${deckId}/share`, { method: "DELETE" });
+    closeDeckQr();
+    toast("Freigabe deaktiviert.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function closeDeckQr() {
+  document.body.classList.remove("qr-printing");
+  $("deckQrDialog").close();
+}
+
+function printDeckQr() {
+  document.body.classList.add("qr-printing");
+  window.addEventListener("afterprint", () => document.body.classList.remove("qr-printing"), { once: true });
+  window.print();
+}
+
+const historyLabels = {
+  added: "Hinzugefuegt",
+  deck_added: "Ins Deck gelegt",
+  deck_removed: "Aus Deck genommen",
+  deck_moved: "Deck gewechselt",
+  moved: "Verschoben",
+  deleted: "Geloescht",
+};
+
+async function loadHistory() {
+  const params = new URLSearchParams({ limit: "500" });
+  const query = $("historySearch")?.value.trim();
+  const action = $("historyAction")?.value;
+  if (query) params.set("q", query);
+  if (action) params.set("action", action);
+  const items = await api(`/api/history?${params.toString()}`);
+  const groups = groupHistoryItems(items);
+  $("historyMeta").textContent = groups.length === items.length
+    ? countLabel(items.length, "Ereignis", "Ereignisse")
+    : countLabel(groups.length, "Eintrag", "Eintraege");
+  $("historyList").innerHTML = groups.map((item) => {
+    const route = item.from_name && item.to_name
+      ? `${escapeHtml(item.from_name)} → ${escapeHtml(item.to_name)}`
+      : escapeHtml(item.to_name || item.from_name || "");
+    const time = new Intl.DateTimeFormat("de-CH", { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.created_at));
+    return `
+      <article class="history-row history-${escapeHtml(item.action)}">
+        <time datetime="${escapeHtml(item.created_at)}">${escapeHtml(time)}</time>
+        <div>
+          <strong>${escapeHtml(item.card_name)}</strong>
+          <span>${item.quantity > 1 ? `${item.quantity}× ` : ""}${escapeHtml(historyLabels[item.action] || item.action)}${item.is_proxy ? " · Proxy" : ""}</span>
+        </div>
+        <span class="history-route">${route}</span>
+      </article>`;
+  }).join("") || emptyState("Noch keine Aenderungen aufgezeichnet.");
+}
+
+function groupHistoryItems(items) {
+  const groups = [];
+  for (const item of items) {
+    const previous = groups[groups.length - 1];
+    const sameEvent = previous
+      && previous.card_id === item.card_id
+      && previous.action === item.action
+      && previous.from_name === item.from_name
+      && previous.to_name === item.to_name
+      && previous.is_proxy === item.is_proxy
+      && Math.abs(new Date(previous.lastCreatedAt).getTime() - new Date(item.created_at).getTime()) <= 10000;
+    if (sameEvent) {
+      previous.quantity += 1;
+      previous.lastCreatedAt = item.created_at;
+    } else {
+      groups.push({ ...item, quantity: 1, lastCreatedAt: item.created_at });
+    }
+  }
+  return groups;
 }
 
 async function refreshBasics() {
@@ -319,51 +1443,114 @@ async function refreshBasics() {
     state.selectedDeckId = decks[0].id;
   }
   renderDeckSelect();
-  renderLocations();
+  renderDeckFormatFilter();
   renderTagFilter();
   renderSetFilter();
 }
 
 function renderTagFilter() {
   const collectionCurrent = $("collectionTagFilter").value;
+  const builderCurrent = $("deckBuilderTagFilter").value;
   $("collectionTagFilter").innerHTML = `<option value="">Alle Tags</option>${state.tagCatalog.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(tag)}</option>`).join("")}`;
+  $("deckBuilderTagFilter").innerHTML = $("collectionTagFilter").innerHTML;
   $("collectionTagFilter").value = collectionCurrent;
+  $("deckBuilderTagFilter").value = builderCurrent;
 }
 
 function renderSetFilter() {
   const collectionCurrent = $("collectionSetFilter").value;
-  $("collectionSetFilter").innerHTML = `<option value="">Alle Sets</option>${state.setCatalog.map((set) => {
+  const builderCurrent = $("deckBuilderSetFilter").value;
+  const options = `<option value="">Alle Sets</option>${state.setCatalog.map((set) => {
     const code = String(set.code || "").toUpperCase();
     const name = set.name || code;
     const count = Number(set.card_count || 0);
     return `<option value="${escapeHtml(set.code)}">${escapeHtml(code)} - ${escapeHtml(name)} (${count})</option>`;
   }).join("")}`;
+  $("collectionSetFilter").innerHTML = options;
+  $("deckBuilderSetFilter").innerHTML = options;
   $("collectionSetFilter").value = collectionCurrent;
+  $("deckBuilderSetFilter").value = builderCurrent;
 }
 
 function renderDeckSelect() {
-  $("deckSelect").innerHTML = state.decks.map((deck) => (
+  const options = state.decks.map((deck) => (
     `<option value="${deck.id}">${escapeHtml(deck.name)} (${escapeHtml(deck.format || "")})</option>`
   )).join("");
+  $("deckSelect").innerHTML = options || `<option value="">Kein Deck</option>`;
+  $("collectionActiveDeck").innerHTML = `<option value="">Kein Deck</option>${options}`;
   if (state.selectedDeckId) {
     $("deckSelect").value = state.selectedDeckId;
   }
+  if (state.collectionActiveDeckId) {
+    $("collectionActiveDeck").value = state.collectionActiveDeckId;
+  } else {
+    $("collectionActiveDeck").value = "";
+  }
+}
+
+function renderDeckFormatFilter() {
+  const select = $("deckFormatFilter");
+  if (!select) return;
+  const current = select.value;
+  const formats = [...new Set(state.decks.map((deck) => deck.format).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  select.innerHTML = `<option value="">Alle Formate</option>${formats.map((format) => `<option value="${escapeHtml(format)}">${escapeHtml(format)}</option>`).join("")}`;
+  select.value = formats.includes(current) ? current : "";
+}
+
+function selectedDeckIdFromElement(id) {
+  const value = Number($(id)?.value);
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function collectionSearchParams() {
+  return cardSearchParams({
+    search: "collectionSearch",
+    manaSelector: ".collectionManaFilter.active",
+    cmcMin: "collectionCmcMin",
+    cmcMax: "collectionCmcMax",
+    type: "collectionTypeFilter",
+    tag: "collectionTagFilter",
+    legal: "collectionLegalFilter",
+    rarity: "collectionRarityFilter",
+    set: "collectionSetFilter",
+    lang: "collectionLangFilter",
+    minPrice: "collectionMinPrice",
+    sort: "collectionSort",
+  });
+}
+
+function deckBuilderSearchParams() {
+  return cardSearchParams({
+    search: "deckBuilderSearch",
+    manaSelector: ".deckBuilderManaFilter.active",
+    cmcMin: "deckBuilderCmcMin",
+    cmcMax: "deckBuilderCmcMax",
+    type: "deckBuilderTypeFilter",
+    tag: "deckBuilderTagFilter",
+    legal: "deckBuilderLegalFilter",
+    rarity: "deckBuilderRarityFilter",
+    set: "deckBuilderSetFilter",
+    lang: "deckBuilderLangFilter",
+    minPrice: "deckBuilderMinPrice",
+    sort: "deckBuilderSort",
+  });
+}
+
+function cardSearchParams(ids) {
   const params = new URLSearchParams();
-  const colors = [...document.querySelectorAll(".collectionManaFilter.active")].map((button) => button.dataset.color);
-  params.set("q", $("collectionSearch").value.trim());
+  const colors = [...document.querySelectorAll(ids.manaSelector)].map((button) => button.dataset.color);
+  params.set("q", $(ids.search).value.trim());
   params.set("colors", colors.join(","));
-  if ($("collectionCmcMin").value !== "") params.set("cmc_min", $("collectionCmcMin").value);
-  if ($("collectionCmcMax").value !== "") params.set("cmc_max", $("collectionCmcMax").value);
-  if ($("collectionTypeFilter").value) params.set("card_type", $("collectionTypeFilter").value);
-  if ($("collectionTagFilter").value) params.set("tag", $("collectionTagFilter").value);
-  if ($("collectionLegalFilter").value) params.set("legal_format", $("collectionLegalFilter").value);
-  if ($("collectionRarityFilter").value) params.set("rarity", $("collectionRarityFilter").value);
-  if ($("collectionSetFilter").value) params.set("set_code", $("collectionSetFilter").value);
-  if ($("collectionMinPrice").value !== "") params.set("min_price_eur", $("collectionMinPrice").value);
-  params.set("sort", $("collectionSort").value);
+  if ($(ids.cmcMin).value !== "") params.set("cmc_min", $(ids.cmcMin).value);
+  if ($(ids.cmcMax).value !== "") params.set("cmc_max", $(ids.cmcMax).value);
+  if ($(ids.type).value) params.set("card_type", $(ids.type).value);
+  if ($(ids.tag).value) params.set("tag", $(ids.tag).value);
+  if ($(ids.legal).value) params.set("legal_format", $(ids.legal).value);
+  if ($(ids.rarity).value) params.set("rarity", $(ids.rarity).value);
+  if ($(ids.set).value) params.set("set_code", $(ids.set).value);
+  if (ids.lang && $(ids.lang).value) params.set("langs", $(ids.lang).value);
+  if ($(ids.minPrice).value !== "") params.set("min_price_eur", $(ids.minPrice).value);
+  params.set("sort", $(ids.sort).value);
   return params;
 }
 
@@ -374,44 +1561,84 @@ function allCardsSortValue(sort) {
 
 async function loadCollection(reset = true) {
   const allCardsMode = $("collectionSearchAllCards").checked;
+  if (reset) {
+    state.collection = [];
+    state.collectionOffset = 0;
+    state.collectionHasMore = true;
+  }
+  if (!state.collectionHasMore) return;
+  const params = collectionSearchParams();
+  params.set("limit", String(state.collectionPageSize));
+  params.set("offset", String(state.collectionOffset));
   if (allCardsMode) {
-    if (reset) {
-      state.collection = [];
-      state.collectionOffset = 0;
-      state.collectionHasMore = true;
-    }
-    if (!state.collectionHasMore) return;
-    const params = collectionSearchParams();
     params.set("sort", allCardsSortValue($("collectionSort").value));
-    params.set("limit", String(state.collectionPageSize));
-    params.set("offset", String(state.collectionOffset));
     const cards = await api(`/api/cards/search?${params.toString()}`);
     state.collection = reset ? cards : [...state.collection, ...cards];
     state.collectionOffset += cards.length;
     state.collectionHasMore = cards.length === state.collectionPageSize;
   } else {
-    const params = collectionSearchParams();
-    state.collection = await api(`/api/collection/summary?${params.toString()}`);
-    state.collectionHasMore = false;
-    state.collectionOffset = state.collection.length;
+    const cards = await api(`/api/collection/summary?${params.toString()}`);
+    state.collection = reset ? cards : [...state.collection, ...cards];
+    state.collectionOffset += cards.length;
+    state.collectionHasMore = cards.length === state.collectionPageSize;
   }
   renderCollection();
 }
 
 function renderCollection() {
   const allCardsMode = $("collectionSearchAllCards").checked;
-  $("collectionSearch").placeholder = allCardsMode ? "Alle Karten suchen..." : "Sammlung suchen...";
-  $("collectionExportFormat").style.display = allCardsMode ? "none" : "";
-  $("exportCollection").style.display = allCardsMode ? "none" : "inline-flex";
+  updateCollectionScopeUi();
+  $("collectionSearch").placeholder = "Name / Kennung";
   $("collectionGrid").innerHTML = state.collection.map((card) => cardTile(card, {
     count: card.total_count,
-    subCount: card.set_code ? `${card.set_code} #${card.collector_number || ""}` : "",
+    subCount: cardPrintSummary(card),
     source: allCardsMode ? "global" : "collection",
-  })).join("") || emptyState(allCardsMode ? "Keine Karten gefunden. Falls leer: Scryfall importieren." : "Noch keine Karten in deiner Sammlung.");
-  $("collectionMeta").textContent = allCardsMode
-    ? `${state.collection.length} Karten aus Scryfall angezeigt`
-    : `${state.collection.length} Karten in deiner Ansicht`;
-  $("collectionLoadMore").style.display = allCardsMode && state.collectionHasMore ? "block" : "none";
+  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall pruefen." : "Sammlung leer.");
+  $("collectionMeta").textContent = countLabel(state.collection.length, "Karte", "Karten");
+  $("collectionLoadMore").style.display = state.collectionHasMore ? "block" : "none";
+}
+
+async function loadDeckBuilderCollection(reset = true) {
+  const allCardsMode = $("deckBuilderSearchAllCards").checked;
+  if (allCardsMode) {
+    if (reset) {
+      state.deckBuilderCards = [];
+      state.deckBuilderOffset = 0;
+      state.deckBuilderHasMore = true;
+    }
+    if (!state.deckBuilderHasMore) return;
+    const params = deckBuilderSearchParams();
+    params.set("sort", allCardsSortValue($("deckBuilderSort").value));
+    params.set("limit", String(state.deckBuilderPageSize));
+    params.set("offset", String(state.deckBuilderOffset));
+    const cards = await api(`/api/cards/search?${params.toString()}`);
+    state.deckBuilderCards = reset ? cards : [...state.deckBuilderCards, ...cards];
+    state.deckBuilderOffset += cards.length;
+    state.deckBuilderHasMore = cards.length === state.deckBuilderPageSize;
+  } else {
+    const params = deckBuilderSearchParams();
+    state.deckBuilderCards = await api(`/api/collection/summary?${params.toString()}`);
+    state.deckBuilderOffset = state.deckBuilderCards.length;
+    state.deckBuilderHasMore = false;
+  }
+  renderDeckBuilderCollection();
+}
+
+function renderDeckBuilderCollection() {
+  const box = $("deckBuilderCollection");
+  if (!box) return;
+  const allCardsMode = $("deckBuilderSearchAllCards").checked;
+  updateDeckBuilderScopeUi();
+  $("deckBuilderSearch").placeholder = "Name / Kennung";
+  const cards = state.deckBuilderCards;
+  $("deckBuilderCollectionMeta").textContent = cards.length ? countLabel(cards.length, "Karte", "Karten") : "";
+  box.innerHTML = cards.map((card) => cardTile(card, {
+    count: card.total_count,
+    subCount: cardPrintSummary(card),
+    source: allCardsMode ? "global" : "collection",
+    deckBuilder: true,
+  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall pruefen." : "Keine Karten.");
+  $("deckBuilderLoadMore").style.display = allCardsMode && state.deckBuilderHasMore ? "block" : "none";
 }
 
 async function loadCollectionStats() {
@@ -496,6 +1723,52 @@ function renderCollectionStats() {
         `).join("") || emptyState("Noch keine Karten mit Wert gefunden.")}
       </div>
     </section>
+    <section class="stats-panel">
+      <h3>Sets</h3>
+      <div class="set-progress-list">
+        ${(stats.set_stats || []).map((set) => `
+          <article class="set-progress-row">
+            <div>
+              <strong>${escapeHtml(set.name)}</strong>
+              <small>${escapeHtml((set.code || "").toUpperCase())} - ${set.owned_prints || 0}/${set.total_prints || 0} Drucke</small>
+            </div>
+            <div class="set-progress-main">
+              <div class="stat-bar"><i style="width: ${Math.max(0, Math.min(100, Number(set.completion_percent || 0)))}%"></i></div>
+              <span>${Number(set.completion_percent || 0).toFixed(1)}%</span>
+            </div>
+            <div class="set-progress-meta">
+              <span>${set.owned_copies || 0} Originale</span>
+              ${set.proxy_copies ? `<span>${set.proxy_copies} Proxies</span>` : ""}
+              <span class="missing-value">${set.missing_prints || 0} fehlen</span>
+            </div>
+            ${(set.missing_examples || []).length ? `
+              <details class="set-missing">
+                <summary>Fehlende Beispiele</summary>
+                <div>
+                  ${set.missing_examples.map((card) => `<span>${escapeHtml(card.name)} <small>#${escapeHtml(card.collector_number || "")}</small></span>`).join("")}
+                </div>
+              </details>
+            ` : ""}
+          </article>
+        `).join("") || emptyState("Noch keine Set-Daten.")}
+      </div>
+    </section>
+    <section class="stats-panel">
+      <h3>Deck-Werte</h3>
+      <div class="deck-value-list">
+        ${(stats.deck_value_stats || []).map((deck) => `
+          <article class="deck-value-row">
+            <div>
+              <strong>${escapeHtml(deck.name)}</strong>
+              <small>${escapeHtml(deck.format || "")} - ${deck.slot_quantity || 0} Kartenpositionen</small>
+            </div>
+            <span><strong>${formatEuro(deck.deck_list_value_eur)}</strong><small>Deckliste</small></span>
+            <span><strong>${formatEuro(deck.assigned_original_value_eur)}</strong><small>Originale</small></span>
+            <span class="missing-value"><strong>${formatEuro(deck.missing_value_eur)}</strong><small>Fehlt</small></span>
+          </article>
+        `).join("") || emptyState("Noch keine Decks.")}
+      </div>
+    </section>
   `;
 }
 
@@ -517,7 +1790,7 @@ function renderPlanning() {
   $("planningSummary").innerHTML = `
     <div class="planning-card">
       <strong>${missingTotal}</strong>
-      <span>fehlende/geplante Karten</span>
+      <span>Fehlend / geplant</span>
     </div>
     <div class="planning-card">
       <strong>${conflictTotal}</strong>
@@ -525,7 +1798,7 @@ function renderPlanning() {
     </div>
     <div class="planning-card">
       <strong>${data.decks.length}</strong>
-      <span>Decks beobachtet</span>
+      <span>Decks</span>
     </div>
   `;
   const missing = data.missing.map((item) => `
@@ -553,26 +1826,36 @@ function renderPlanning() {
   `).join("");
   $("planningList").innerHTML = `
     <h3>Fehlt / geplant</h3>
-    ${missing || emptyState("Aktuell fehlt nichts. Schoener Zustand.")}
+    ${missing || emptyState("Nichts offen.")}
     <h3>Konflikte</h3>
-    ${conflicts || emptyState("Keine Konflikte gefunden.")}
+    ${conflicts || emptyState("Keine Konflikte.")}
   `;
 }
 
 function cardTile(card, options) {
   const count = Number(options.count || 0);
   const countBadge = count > 0 ? `<span class="count-badge" title="${count} Copies in ManaVault">${count}x</span>` : "";
+  const tokenBadge = card.is_token ? `<span class="token-badge">Token</span>` : "<span></span>";
   const valueInfo = valueBadge(card, options.source);
-  const metaRow = countBadge || valueInfo
-    ? `<div class="tile-meta-row">${countBadge || "<span></span>"}<span></span>${valueInfo || "<span></span>"}</div>`
-    : "";
+  const metaRow = `<div class="tile-meta-row" aria-hidden="${countBadge || valueInfo || card.is_token ? "false" : "true"}">${countBadge || "<span></span>"}${tokenBadge}${valueInfo || "<span></span>"}</div>`;
   const typeLine = displayType(card);
   const subCount = options.subCount || "";
   const previewAttrs = card.image_url
     ? `onmouseenter="showCardPreview(event, '${escapeHtml(card.image_url)}')" onmousemove="moveCardPreview(event)" onmouseleave="hideCardPreview()"`
     : "";
+  const deckBuilderAction = options.deckBuilder
+    ? `<button class="tile-action secondary" title="Original hinzufuegen und ins Deck" aria-label="Original hinzufuegen und ins Deck" onclick="addOriginalToDeck(${card.id}, event)">${iconSvg("originalDeck")}</button>`
+    : "";
+  const addToDeckAction = options.deckBuilder || collectionTargetDeckId()
+    ? `<button class="tile-action primary" title="Ins Deck" aria-label="Ins Deck" onclick="addToDeckFlow(${card.id}, event)">${iconSvg("deck")}</button>`
+    : "";
+  const burst = state.quickAddBursts.get(Number(card.id));
+  const burstCounter = burst
+    ? `<span class="quick-add-counter${burst.isProxy ? " proxy" : ""}" aria-live="polite">+${burst.count}${burst.isProxy ? " P" : ""}</span>`
+    : "";
   return `
-    <article class="card-tile" ${previewAttrs}>
+    <article class="card-tile${options.deckBuilder ? " deckbuilder-tile" : ""}${card.is_token ? " token-card" : ""}" data-card-id="${card.id}" ${previewAttrs}>
+      ${burstCounter}
       <button class="image-button" onclick="openCardDetail(${card.id})">
         ${card.image_url ? `<img src="${escapeHtml(card.image_url)}" alt="">` : `<span>${escapeHtml(displayName(card))}</span>`}
       </button>
@@ -586,7 +1869,8 @@ function cardTile(card, options) {
         ${tagChips(card.tags || [], 3)}
       </div>
       <div class="tile-actions">
-        <button class="tile-action primary" title="Ins Deck" aria-label="Ins Deck" onclick="addToDeckFlow(${card.id}, event)">${iconSvg("deck")}</button>
+        ${addToDeckAction}
+        ${deckBuilderAction}
         <button class="tile-action secondary" title="Original hinzufuegen" aria-label="Original hinzufuegen" onclick="quickAddCopy(${card.id}, false, event)">${iconSvg("original")}</button>
         <button class="tile-action secondary" title="Proxy hinzufuegen" aria-label="Proxy hinzufuegen" onclick="quickAddCopy(${card.id}, true, event)">${iconSvg("proxy")}</button>
       </div>
@@ -598,15 +1882,19 @@ function iconSvg(name) {
   const icons = {
     deck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="11" height="15" rx="2"></rect><path d="M9 2h8a2 2 0 0 1 2 2v12"></path><path d="M9 8h5"></path><path d="M9 12h5"></path></svg>`,
     original: `<span class="action-symbol">O</span><span class="action-plus">+</span>`,
+    originalDeck: `<span class="action-symbol">O</span><svg class="action-mini-deck" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="11" height="15" rx="2"></rect><path d="M9 8h5"></path><path d="M9 12h5"></path></svg>`,
     proxy: `<span class="action-symbol proxy-symbol">P</span><span class="action-plus">+</span>`,
     proxyBadge: `<span class="metric-letter proxy-symbol">P</span>`,
-    newDeck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="10" height="16" rx="2"></rect><path d="M8 8h4"></path><path d="M8 12h4"></path><path d="M18 8v8"></path><path d="M14 12h8"></path></svg>`,
     open: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>`,
+    qr: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M14 14h3v3h-3zM18 14h3v7h-3M14 19h3v2h-3"></path></svg>`,
     edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>`,
     delete: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 13h10l1-13"></path><path d="M9 7V4h6v3"></path></svg>`,
+    cover: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2l-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"></path></svg>`,
+    coverFilled: `<svg class="filled-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2l-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"></path></svg>`,
     download: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 20h14"></path></svg>`,
     upload: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"></path><path d="m7 14 5-5 5 5"></path><path d="M5 4h14"></path></svg>`,
     databaseImport: `<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"></ellipse><path d="M5 5v8c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path><path d="M5 9c0 1.7 3.1 3 7 3s7-1.3 7-3"></path><path d="M12 22v-6"></path><path d="m8 18 4 4 4-4"></path></svg>`,
+    back: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"></path><path d="m12 5-7 7 7 7"></path></svg>`,
     cart: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="20" r="1.5"></circle><circle cx="18" cy="20" r="1.5"></circle><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.8a2 2 0 0 0 2-1.6L21 8H7"></path></svg>`,
     refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M19.2 11A7.5 7.5 0 1 0 17 17.3"></path></svg>`,
     allCards: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>`,
@@ -628,6 +1916,22 @@ function valueBadge(card, source) {
     return `<span class="value-badge" title="Scryfall EUR Preis${priceSource}">${formatEuro(price)}</span>`;
   }
   return "";
+}
+
+function priceDetailBlock(card) {
+  const price = Number(card.price_eur || 0);
+  const total = Number(card.collection_value_eur || 0);
+  const source = card.price_source && card.price_source !== "own" ? "ueber englischen Preis" : "eigener Preis";
+  if (price <= 0 && total <= 0) return "";
+  return `
+    <div class="price-detail">
+      <span>
+        <strong>${formatEuro(price)}</strong>
+        <small>Einzelpreis ${source}</small>
+      </span>
+      ${total > 0 ? `<span><strong>${formatEuro(total)}</strong><small>Sammlungswert Originale</small></span>` : ""}
+    </div>
+  `;
 }
 
 function formatEuro(value) {
@@ -657,13 +1961,16 @@ function updateGlobalCopyCounts(cardId, counts) {
     deck_count: Number(counts.deck_count || 0),
   });
   let updated = false;
-  [...state.collection, ...state.globalCards].forEach((card) => {
+  [...state.collection, ...state.deckBuilderCards].forEach((card) => {
     if (Number(card.id) === Number(cardId)) {
       applyCounts(card);
       updated = true;
     }
   });
-  if (updated) renderCollection();
+  if (updated) {
+    renderCollection();
+    renderDeckBuilderCollection();
+  }
   return updated;
 }
 
@@ -672,7 +1979,7 @@ function manaCostHtml(cost) {
   if (!matches.length) return escapeHtml(cost);
   return matches.map((match) => {
     const symbol = match[1];
-    const file = symbol.replaceAll("/", "-");
+    const file = symbol.replaceAll("/", "");
     const url = `${SYMBOL_BASE}/${encodeURIComponent(file)}.svg`;
     return `<img class="mana-symbol" src="${url}" alt="${escapeHtml(symbol)}" title="${escapeHtml(symbol)}">`;
   }).join("");
@@ -719,6 +2026,7 @@ async function openCardDetail(cardId) {
         <h2>${escapeHtml(displayName(card))}</h2>
         ${oracleNameHint(card)}
         <p class="muted">${escapeHtml(card.mana_cost || "")} ${escapeHtml(displayType(card))}</p>
+        ${priceDetailBlock(card)}
         <p>${escapeHtml(card.printed_text || card.oracle_text || "")}</p>
         ${renderTagEditor(card.id, detail.tags)}
         <div class="button-row">
@@ -726,7 +2034,7 @@ async function openCardDetail(cardId) {
           <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, false)">Original hinzufuegen</button>
           <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, true)">Proxy hinzufuegen</button>
         </div>
-        <h3>Fundorte</h3>
+        <h3>Status</h3>
         ${detail.places.map((place) => `
           <div class="place-row">
             <strong>${place.quantity}x</strong>
@@ -787,13 +2095,6 @@ async function toggleCardTag(cardId, tag) {
 
 function copyEditor(copy) {
   const isInDeck = Boolean(copy.assigned_deck_id);
-  const collectionLocations = state.locations.filter((location) => location.type !== "Deck");
-  const locationSelect = `
-    <select onchange="patchCopy(${copy.id}, { location_id: Number(this.value) || null })">
-      <option value="">Ohne Ort</option>
-      ${collectionLocations.map((location) => `<option value="${location.id}" ${location.id === copy.location_id ? "selected" : ""}>${escapeHtml(location.name)}</option>`).join("")}
-    </select>
-  `;
   const deckSelect = `
     <select onchange="patchCopy(${copy.id}, { assigned_deck_id: Number(this.value) || null })">
       <option value="">Deck waehlen...</option>
@@ -805,7 +2106,7 @@ function copyEditor(copy) {
       <span>#${copy.id}</span>
       <span class="tag ${copy.is_proxy ? "warn" : "good"}">${copy.is_proxy ? "Proxy" : "Original"}</span>
       <strong>${isInDeck ? "Deck" : "Sammlung"}</strong>
-      ${isInDeck ? deckSelect : locationSelect}
+      ${isInDeck ? deckSelect : `<span class="muted">In deiner Sammlung</span>`}
       ${isInDeck ? `<button class="secondary" type="button" onclick="moveCopyToCollection(${copy.id}, ${copy.card_id})">Zur Sammlung</button>` : deckSelect}
       <button class="secondary" type="button" onclick="deleteCopy(${copy.id}, ${copy.card_id})">Loeschen</button>
     </div>
@@ -819,10 +2120,47 @@ async function quickAddCopy(cardId, isProxy, event = null) {
       method: "POST",
       body: JSON.stringify({ card_id: cardId, is_proxy: isProxy, location_id: locationId }),
     });
+    recordQuickAddBurst(cardId, isProxy);
     toast(isProxy ? "Proxy hinzugefuegt." : "Original hinzugefuegt.");
     if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
     if ($("cardDialog").open) await openCardDetail(cardId);
   });
+}
+
+function recordQuickAddBurst(cardId, isProxy) {
+  const key = Number(cardId);
+  const previous = state.quickAddBursts.get(key);
+  if (previous?.timer) clearTimeout(previous.timer);
+  if (previous?.fadeTimer) clearTimeout(previous.fadeTimer);
+  const count = previous && previous.isProxy === isProxy ? previous.count + 1 : 1;
+  const burst = { count, isProxy, fadeTimer: null, timer: null };
+  state.quickAddBursts.set(key, burst);
+  burst.fadeTimer = setTimeout(() => {
+    document.querySelectorAll(`.card-tile[data-card-id="${key}"] .quick-add-counter`).forEach((element) => element.classList.add("fade-out"));
+  }, 1200);
+  burst.timer = setTimeout(() => {
+    if (state.quickAddBursts.get(key) !== burst) return;
+    state.quickAddBursts.delete(key);
+    document.querySelectorAll(`.card-tile[data-card-id="${key}"] .quick-add-counter`).forEach((element) => element.remove());
+  }, 1900);
+}
+
+async function addOriginalToDeck(cardId, event = null) {
+  const deckId = selectedDeckId();
+  if (!deckId) {
+    toast("Bitte im Deckbuilder ein Deck auswaehlen.");
+    return;
+  }
+  await withActionButton(event, async () => {
+    const result = await api(`/api/decks/${deckId}/add-card`, {
+      method: "POST",
+      body: JSON.stringify({ card_id: cardId, quantity: 1, action: "create_original" }),
+    });
+    recordQuickAddBurst(cardId, false);
+    toast(`${result.card_name} als Original hinzugefuegt und ins Deck gelegt.`);
+    if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
+    await Promise.all([loadDeck(), loadDecks(), loadPlanning()]);
+  }).catch((error) => toast(error.message));
 }
 
 async function moveCopyToCollection(id, cardId) {
@@ -846,9 +2184,9 @@ async function deleteCopy(id, cardId) {
 }
 
 async function addToDeckFlow(cardId, event = null) {
-  const deckId = selectedDeckId();
+  const deckId = cardActionDeckId();
   if (!deckId) {
-    toast("Bitte zuerst ein Deck erstellen.");
+    toast(state.activePage === "deckBuilderPage" ? "Bitte im Deckbuilder ein Deck auswaehlen." : "Bitte oben in der Sammlung ein aktives Deck auswaehlen.");
     return;
   }
   await withActionButton(event, async () => {
@@ -858,10 +2196,12 @@ async function addToDeckFlow(cardId, event = null) {
     });
     if (result.requires_decision) {
       state.pendingCardId = cardId;
+      state.pendingDeckId = deckId;
       renderDecision(result.availability);
       $("decisionDialog").showModal();
       return;
     }
+    recordQuickAddBurst(cardId, false);
     toast(`${result.card_name} wurde dem Deck hinzugefuegt.`);
     if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
     scheduleDeckRefresh();
@@ -889,7 +2229,7 @@ function renderDecision(availability) {
 }
 
 async function resolveDecision(action, copyId = null) {
-  const deckId = selectedDeckId();
+  const deckId = state.pendingDeckId || cardActionDeckId();
   const cardId = state.pendingCardId;
   if (!deckId || !cardId) return;
   const result = await api(`/api/decks/${deckId}/add-card`, {
@@ -897,6 +2237,9 @@ async function resolveDecision(action, copyId = null) {
     body: JSON.stringify({ card_id: cardId, quantity: 1, action, copy_id: copyId, allow_proxy: action !== "plan" }),
   });
   $("decisionDialog").close();
+  state.pendingCardId = null;
+  state.pendingDeckId = null;
+  recordQuickAddBurst(cardId, action === "proxy");
   toast("Deck aktualisiert.");
   if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
   scheduleDeckRefresh();
@@ -906,23 +2249,97 @@ async function resolveDecision(action, copyId = null) {
 async function loadDecks() {
   state.decks = await api("/api/decks");
   renderDeckSelect();
+  renderDeckFormatFilter();
   renderDeckList();
 }
 
 function renderDeckList() {
-  $("deckList").innerHTML = state.decks.map((deck) => `
-    <article class="row-card">
-      <div>
+  const decks = filteredDecks();
+  $("deckMeta").textContent = decks.length === state.decks.length
+    ? countLabel(state.decks.length, "Deck", "Decks")
+    : `${decks.length}/${state.decks.length} Decks`;
+  $("deckList").innerHTML = decks.map((deck) => `
+    <article class="deck-overview-card">
+      <button class="deck-cover-button" onclick="selectDeck(${deck.id})" title="Deck oeffnen" aria-label="Deck oeffnen">
+        ${deck.commander_image_url ? `<img src="${escapeHtml(deck.commander_image_url)}" alt="">` : `<span>${escapeHtml(deck.name)}</span>`}
+      </button>
+      <div class="deck-overview-body">
         <strong>${escapeHtml(deck.name)}</strong>
-        <span class="muted">${escapeHtml(deck.format || "")} - ${deck.slot_quantity || 0} Karten</span>
+        <span class="muted">${escapeHtml(deck.format || "")}</span>
+        <div class="deck-overview-metrics">
+          <span>${deck.slot_quantity || 0} Karten</span>
+          ${Number(deck.token_quantity || 0) > 0 ? `<span>${deck.token_quantity} Tokens</span>` : ""}
+          <span>${formatEuro(deck.deck_list_value_eur || 0)}</span>
+        </div>
+        <div class="deck-chip-row">
+          ${(deck.colors || []).map((color) => `<span><img src="${MANA_SYMBOLS[color]}" alt="${color}"></span>`).join("")}
+          ${(deck.types || []).slice(0, 4).map((type) => `<small>${escapeHtml(type)}</small>`).join("")}
+        </div>
       </div>
-      <div class="row-actions">
+      <div class="deck-overview-actions">
         <button class="icon-button" title="Oeffnen" aria-label="Oeffnen" onclick="selectDeck(${deck.id})">${iconSvg("open")}</button>
+        <button class="icon-button secondary" title="QR-Code erstellen" aria-label="QR-Code erstellen" onclick="openDeckQr(${deck.id})">${iconSvg("qr")}</button>
+        <button class="icon-button secondary" title="Deck exportieren" aria-label="Deck exportieren" onclick="exportDeck(${deck.id})">${iconSvg("download")}</button>
         <button class="icon-button secondary" title="Bearbeiten" aria-label="Bearbeiten" onclick="editDeck(${deck.id})">${iconSvg("edit")}</button>
         <button class="icon-button secondary danger" title="Loeschen" aria-label="Loeschen" onclick="deleteDeck(${deck.id})">${iconSvg("delete")}</button>
       </div>
     </article>
   `).join("") || emptyState("Noch keine Decks.");
+}
+
+function filteredDecks() {
+  const query = $("deckSearch").value.trim().toLowerCase();
+  const format = $("deckFormatFilter").value;
+  const type = $("deckTypeFilter").value;
+  const colors = [...document.querySelectorAll(".deckListManaFilter.active")].map((button) => button.dataset.color);
+  const sort = $("deckSort").value;
+  const filtered = state.decks.filter((deck) => {
+    const haystack = `${deck.name || ""} ${deck.format || ""}`.toLowerCase();
+    if (query && !haystack.includes(query)) return false;
+    if (format && deck.format !== format) return false;
+    if (type && !(deck.types || []).includes(type)) return false;
+    if (colors.length && !colors.every((color) => (deck.colors || []).includes(color))) return false;
+    return true;
+  });
+  const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""));
+  if (sort === "cards") {
+    return filtered.sort((a, b) => Number(b.slot_quantity || 0) - Number(a.slot_quantity || 0) || byName(a, b));
+  }
+  if (sort === "value") {
+    return filtered.sort((a, b) => Number(b.deck_list_value_eur || 0) - Number(a.deck_list_value_eur || 0) || byName(a, b));
+  }
+  if (sort === "format") {
+    return filtered.sort((a, b) => String(a.format || "").localeCompare(String(b.format || "")) || byName(a, b));
+  }
+  return filtered.sort(byName);
+}
+
+function setupDeckWorkbenchResize() {
+  const divider = $("deckWorkbenchDivider");
+  const workbench = $("deckBuilderWorkbench");
+  if (!divider || !workbench) return;
+  const applySplit = () => {
+    workbench.style.setProperty("--deck-left", `${state.deckBuilderSplit}%`);
+  };
+  applySplit();
+  divider.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    const rect = workbench.getBoundingClientRect();
+    const move = (moveEvent) => {
+      const raw = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      state.deckBuilderSplit = Math.max(32, Math.min(68, raw));
+      applySplit();
+    };
+    const up = () => {
+      divider.removeEventListener("pointermove", move);
+      divider.removeEventListener("pointerup", up);
+      divider.removeEventListener("pointercancel", up);
+    };
+    divider.addEventListener("pointermove", move);
+    divider.addEventListener("pointerup", up);
+    divider.addEventListener("pointercancel", up);
+  });
 }
 
 async function createDeckFromForm(event) {
@@ -937,33 +2354,24 @@ async function createDeckFromForm(event) {
   await loadDecks();
   await loadDeck();
   await loadPlanning();
-  openDeckBuilder();
-}
-
-async function createDeckQuick() {
-  const name = prompt("Deckname:");
-  if (!name) return;
-  const result = await api("/api/decks", {
-    method: "POST",
-    body: JSON.stringify({ name, format: "Commander" }),
-  });
-  state.selectedDeckId = result.id;
-  await refreshBasics();
-  await loadDecks();
-  await loadDeck();
-  await loadPlanning();
-  openDeckBuilder();
+  await openDeckBuilder();
 }
 
 async function selectDeck(deckId) {
   state.selectedDeckId = deckId;
   renderDeckSelect();
   await loadDeck();
-  openDeckBuilder();
+  await openDeckBuilder();
 }
 
-function openDeckBuilder() {
-  $("deckBuilderDialog").showModal();
+async function openDeckBuilder() {
+  showPage("deckBuilderPage");
+  const deckId = selectedDeckId();
+  if (deckId) {
+    await api(`/api/decks/${deckId}/edit/begin`, { method: "POST" });
+    await loadDeck();
+  }
+  await loadDeckBuilderCollection(true);
 }
 
 async function editDeck(deckId) {
@@ -985,7 +2393,8 @@ async function editDeck(deckId) {
 async function deleteDeck(deckId) {
   if (!confirm("Deck wirklich loeschen? Zugewiesene Copies bleiben in der Sammlung.")) return;
   await api(`/api/decks/${deckId}`, { method: "DELETE" });
-  state.selectedDeckId = null;
+  if (state.selectedDeckId === deckId) state.selectedDeckId = null;
+  if (state.collectionActiveDeckId === deckId) state.collectionActiveDeckId = null;
   await refreshBasics();
   await loadDecks();
   await loadDeck();
@@ -998,27 +2407,190 @@ async function loadDeck() {
     $("deckStatus").innerHTML = "";
     return;
   }
-  const [detail, status] = await Promise.all([
+  const [detail, status, variants] = await Promise.all([
     api(`/api/decks/${deckId}`),
     api(`/api/decks/${deckId}/status`),
+    api(`/api/decks/${deckId}/variants`),
   ]);
+  state.deckVariants = variants.variants || [];
+  state.activeDeckVariantId = variants.active_variant_id;
+  state.deckEditDirty = Boolean(variants.dirty);
+  renderDeckVariantBar();
+  const deckCards = detail.slots.filter((slot) => !slot.is_token && slot.zone !== "sideboard");
+  const sideboard = detail.slots.filter((slot) => !slot.is_token && slot.zone === "sideboard");
+  const tokens = detail.slots.filter((slot) => slot.is_token);
+  const cardCount = deckCards.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+  const sideboardCount = sideboard.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+  const tokenCount = tokens.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
   $("deckDetail").innerHTML = `
-    <h3>${escapeHtml(detail.deck.name)}</h3>
-    ${detail.slots.map((slot) => `
-      <div class="deck-slot">
-        <div>
-          <strong>${slot.quantity} ${escapeHtml(slot.name)}</strong>
-          <small>${escapeHtml(slot.type_line || "")}</small>
-        </div>
-        <button class="icon-button secondary danger" title="Aus Deckliste entfernen" aria-label="Aus Deckliste entfernen" onclick="deleteSlot(${slot.id})">${iconSvg("delete")}</button>
+    <div class="pane-head">
+      <h3>${escapeHtml(detail.deck.name)}</h3>
+      <span class="muted">${cardCount} Karten${sideboardCount ? ` · ${sideboardCount} Sideboard` : ""}${tokenCount ? ` · ${tokenCount} Tokens` : ""}</span>
+    </div>
+    <section class="deck-slot-section">
+      <div class="deck-slot-section-head"><h4>Deckkarten</h4></div>
+      <div class="deck-card-grid">
+        ${deckCards.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Deckkarten. Klicke links bei Karten auf 'Ins Deck'.")}
       </div>
-    `).join("") || emptyState("Deck ist leer. Klicke bei Karten auf 'Ins Deck'.")}
+    </section>
+    <section class="deck-slot-section sideboard-slot-section">
+      <div class="deck-slot-section-head"><h4>Sideboard</h4><span>${sideboardCount}</span></div>
+      <div class="deck-card-grid">
+        ${sideboard.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Sideboard-Karten.")}
+      </div>
+    </section>
+    <section class="deck-slot-section token-slot-section">
+      <div class="deck-slot-section-head"><h4>Tokens</h4><span>${tokenCount}</span></div>
+      <div class="deck-card-grid token-card-grid">
+        ${tokens.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Tokens hinzugefuegt.")}
+      </div>
+    </section>
+    ${requiredTokensBlock(status.required_tokens || [])}
+    ${accessoriesBlock(status.accessories || [])}
   `;
   renderStatus(status);
 }
 
+function deckSlotTile(slot) {
+  const previewAttrs = slot.image_url
+    ? `onmouseenter="showCardPreview(event, '${escapeHtml(slot.image_url)}')" onmousemove="moveCardPreview(event)" onmouseleave="hideCardPreview()"`
+    : "";
+  const coverClass = slot.is_cover ? " is-cover" : "";
+  return `
+    <article class="deck-slot-card${coverClass}${slot.is_token ? " token-slot-card" : ""}" ${previewAttrs}>
+      <button class="image-button" onclick="openCardDetail(${slot.card_id})">
+        ${slot.image_url ? `<img src="${escapeHtml(slot.image_url)}" alt="">` : `<span>${escapeHtml(slot.name)}</span>`}
+      </button>
+      <div class="tile-meta-row">
+        <span class="count-badge">${slot.quantity}x</span>
+        <button class="icon-button secondary slot-decrement" title="Eine Karte entfernen" aria-label="Eine Karte entfernen" onclick="decrementSlot(${slot.id}, event)">&minus;</button>
+        ${slot.is_token ? `<span></span>` : `<button class="icon-button secondary slot-zone" title="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" aria-label="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" onclick="moveSlotZone(${slot.id}, '${slot.zone === "sideboard" ? "mainboard" : "sideboard"}')">${slot.zone === "sideboard" ? "D" : "S"}</button>`}
+        <button class="icon-button secondary cover-button${slot.is_cover ? " active" : ""}" title="Als Deckblatt setzen" aria-label="Als Deckblatt setzen" onclick="setDeckCover(${slot.card_id})">${iconSvg(slot.is_cover ? "coverFilled" : "cover")}</button>
+        <button class="icon-button secondary danger" title="Aus Deckliste entfernen" aria-label="Aus Deckliste entfernen" onclick="deleteSlot(${slot.id})">${iconSvg("delete")}</button>
+      </div>
+      <div class="tile-body">
+        <strong>${escapeHtml(slot.name)}</strong>
+        <span class="mana-cost">${manaCostHtml(slot.mana_cost || "")}</span>
+        <small>${escapeHtml(slot.type_line || "")}</small>
+      </div>
+    </article>
+  `;
+}
+
+function renderDeckVariantBar() {
+  const select = $("deckVariantSelect");
+  const hasVariants = state.deckVariants.length > 0;
+  select.innerHTML = hasVariants
+    ? state.deckVariants.map((variant) => `<option value="${variant.id}">${escapeHtml(variant.name)} (${variant.card_count} Karten)</option>`).join("")
+    : `<option value="">Aktueller Deckstand</option>`;
+  select.disabled = !hasVariants;
+  if (state.activeDeckVariantId) select.value = String(state.activeDeckVariantId);
+  const editState = $("deckEditState");
+  editState.textContent = state.deckEditDirty ? "Ungespeicherte Änderungen" : "Keine offenen Änderungen";
+  editState.classList.toggle("is-dirty", state.deckEditDirty);
+  $("saveDeckChanges").disabled = !state.deckEditDirty;
+  $("discardDeckChanges").disabled = !state.deckEditDirty;
+}
+
+async function continueDeckEditing() {
+  const deckId = selectedDeckId();
+  if (deckId && state.activePage === "deckBuilderPage") {
+    await api(`/api/decks/${deckId}/edit/begin`, { method: "POST" });
+  }
+}
+
+async function saveDeckChanges(event) {
+  const deckId = selectedDeckId();
+  if (!deckId) return;
+  await withActionButton(event, async () => {
+    await api(`/api/decks/${deckId}/edit/save`, { method: "POST" });
+    await continueDeckEditing();
+    toast("Deckänderungen gespeichert.");
+    await Promise.all([loadDeck(), loadDecks(), loadPlanning(), loadCollection(true)]);
+  }).catch((error) => toast(error.message));
+}
+
+async function discardDeckChanges(event) {
+  const deckId = selectedDeckId();
+  if (!deckId || !state.deckEditDirty) return;
+  if (!confirm("Alle Änderungen seit dem Öffnen verwerfen?")) return;
+  await withActionButton(event, async () => {
+    await api(`/api/decks/${deckId}/edit/discard`, { method: "POST" });
+    await continueDeckEditing();
+    toast("Änderungen verworfen.");
+    await Promise.all([loadDeck(), loadDecks(), loadPlanning(), loadCollection(true)]);
+  }).catch((error) => toast(error.message));
+}
+
+async function saveDeckAsVariant(event) {
+  const deckId = selectedDeckId();
+  if (!deckId) return;
+  const suggested = `Variante ${state.deckVariants.length + 1}`;
+  const name = prompt("Name der neuen Variante:", suggested)?.trim();
+  if (!name) return;
+  await withActionButton(event, async () => {
+    await api(`/api/decks/${deckId}/variants`, {
+      method: "POST",
+      body: JSON.stringify({ name, base_name: "Original" }),
+    });
+    await continueDeckEditing();
+    toast(`Variante „${name}“ gespeichert und aktiviert.`);
+    await Promise.all([loadDeck(), loadDecks(), loadPlanning(), loadCollection(true)]);
+  }).catch((error) => toast(error.message));
+}
+
+async function activateSelectedDeckVariant(event) {
+  const deckId = selectedDeckId();
+  const variantId = Number(event.target.value);
+  if (!deckId || !variantId || variantId === Number(state.activeDeckVariantId)) return;
+  if (state.deckEditDirty) {
+    const discard = confirm("Es gibt ungespeicherte Änderungen. Verwerfen und die gewählte Variante aktivieren?");
+    if (!discard) {
+      event.target.value = String(state.activeDeckVariantId || "");
+      return;
+    }
+    await api(`/api/decks/${deckId}/edit/discard`, { method: "POST" });
+  }
+  try {
+    const result = await api(`/api/decks/${deckId}/variants/${variantId}/activate`, { method: "POST" });
+    await continueDeckEditing();
+    toast(result.missing ? `${result.name} aktiviert · ${result.missing} Karten fehlen.` : `${result.name} aktiviert.`);
+    await Promise.all([loadDeck(), loadDecks(), loadPlanning(), loadCollection(true)]);
+  } catch (error) {
+    toast(error.message);
+    event.target.value = String(state.activeDeckVariantId || "");
+  }
+}
+
+async function moveSlotZone(slotId, zone) {
+  const deckId = selectedDeckId();
+  if (!deckId) return;
+  await api(`/api/decks/${deckId}/slots/${slotId}/zone`, {
+    method: "POST",
+    body: JSON.stringify({ zone }),
+  });
+  toast(zone === "sideboard" ? "Karte ins Sideboard verschoben." : "Karte ins Hauptdeck verschoben.");
+  await loadDeck();
+}
+
+async function setDeckCover(cardId) {
+  const deckId = selectedDeckId();
+  if (!deckId) return;
+  await api(`/api/decks/${deckId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ commander_card_id: cardId }),
+  });
+  toast("Deckblatt gesetzt.");
+  await loadDecks();
+  await loadDeck();
+}
+
 function renderStatus(status) {
   const missing = status.cards.filter((item) => item.missing > 0);
+  const tokens = status.tokens || [];
+  const tokenOriginalTotal = tokens.reduce((sum, item) => sum + item.owned, 0);
+  const tokenProxyTotal = tokens.reduce((sum, item) => sum + item.proxy, 0);
+  const tokenMissingTotal = tokens.reduce((sum, item) => sum + item.missing, 0);
   const conflicts = status.conflicts;
   const ownedTotal = status.cards.reduce((sum, item) => sum + item.owned, 0);
   const proxyTotal = status.cards.reduce((sum, item) => sum + item.proxy, 0);
@@ -1028,6 +2600,14 @@ function renderStatus(status) {
     return sum + Math.min(Number(item.missing || 0), Number(item.free_in_collection || 0) + freeProxy);
   }, 0);
   const assignableRows = status.cards.filter((item) => {
+    const freeProxy = item.allow_proxy ? Number(item.free_proxy_in_collection || 0) : 0;
+    return Number(item.missing || 0) > 0 && Number(item.free_in_collection || 0) + freeProxy > 0;
+  });
+  const tokenAssignable = tokens.reduce((sum, item) => {
+    const freeProxy = item.allow_proxy ? Number(item.free_proxy_in_collection || 0) : 0;
+    return sum + Math.min(Number(item.missing || 0), Number(item.free_in_collection || 0) + freeProxy);
+  }, 0);
+  const tokenAssignableRows = tokens.filter((item) => {
     const freeProxy = item.allow_proxy ? Number(item.free_proxy_in_collection || 0) : 0;
     return Number(item.missing || 0) > 0 && Number(item.free_in_collection || 0) + freeProxy > 0;
   });
@@ -1043,7 +2623,7 @@ function renderStatus(status) {
       <div class="assign-list">
         ${assignableRows.map((item) => `
           <button class="assign-row" type="button" onclick="assignFreeCopiesToDeck(${item.card_id})">
-            <span>${escapeHtml(item.name)}</span>
+            <span>${escapeHtml(item.name)}${item.zone === "sideboard" ? ` <small>Sideboard</small>` : ""}</span>
             <small>${Math.min(item.missing, item.free_in_collection + (item.allow_proxy ? item.free_proxy_in_collection : 0))} zuweisen</small>
           </button>
         `).join("")}
@@ -1051,9 +2631,97 @@ function renderStatus(status) {
     ` : ""}
     ${shoppingListBlock("Einkaufsliste", status.shopping_list, "buy")}
     ${shoppingListBlock("Proxy-Liste", status.proxy_list, "proxy")}
-    ${missing.length && !status.shopping_list.length && !status.proxy_list.length ? `<h4>Fehlt / geplant</h4>${missing.map((item) => `<p>${item.missing}x ${escapeHtml(item.name)}</p>`).join("")}` : ""}
+    ${missing.length && !status.shopping_list.length && !status.proxy_list.length ? `<h4>Fehlt / geplant</h4>${missing.map((item) => `<p>${item.missing}x ${escapeHtml(item.name)}${item.zone === "sideboard" ? " (Sideboard)" : ""}</p>`).join("")}` : ""}
     ${conflicts.length ? `<h4>Konflikte</h4>${conflicts.map((item) => `<p>${escapeHtml(item.name)} ist auch in anderen Decks.</p>`).join("")}` : ""}
+    ${tokens.length ? `
+      <section class="token-status-block">
+        <h3>Tokens</h3>
+        <div class="status-strip token-status-strip">
+          ${statusMetric("check", tokenOriginalTotal, "Token Originale", "good")}
+          ${statusMetric("proxyBadge", tokenProxyTotal, "Token Proxies", "warn")}
+          ${statusMetric("missing", tokenMissingTotal, "Fehlende Tokens", "bad")}
+        </div>
+        ${tokenAssignable ? `<button class="wide" type="button" onclick="assignFreeCopiesToDeck(null, 'tokens')">${tokenAssignable} freie Tokens zuweisen</button>` : ""}
+        ${tokenAssignableRows.length ? `
+          <div class="assign-list">
+            ${tokenAssignableRows.map((item) => `
+              <button class="assign-row" type="button" onclick="assignFreeCopiesToDeck(${item.card_id}, 'tokens')">
+                <span>${escapeHtml(item.name)}</span>
+                <small>${Math.min(item.missing, item.free_in_collection + (item.allow_proxy ? item.free_proxy_in_collection : 0))} zuweisen</small>
+              </button>
+            `).join("")}
+          </div>
+        ` : ""}
+      </section>
+    ` : ""}
   `;
+}
+
+function requiredTokensBlock(tokens) {
+  if (!tokens.length) return "";
+  const missingCount = tokens.filter((token) => token.missing > 0).length;
+  return `
+    <section class="required-token-block">
+      <div class="required-token-head">
+        <div>
+          <h3>Benötigte Tokens</h3>
+          <small>Mindestens 1 je Token-Art</small>
+        </div>
+        <span class="${missingCount ? "bad" : "good"}">${missingCount ? `${missingCount} offen` : "Vollständig"}</span>
+      </div>
+      <div class="required-token-list">
+        ${tokens.map((token) => {
+          const status = token.originals > 0
+            ? `${token.originals} Original${token.originals === 1 ? "" : "e"}`
+            : token.proxies > 0
+              ? `${token.proxies} Proxy`
+              : "Noch benötigt";
+          const tone = token.originals > 0 ? "good" : token.proxies > 0 ? "warn" : "bad";
+          return `
+            <article class="required-token-row">
+              ${token.image_url ? `<img src="${escapeHtml(token.image_url)}" alt="">` : `<span class="required-token-placeholder">T</span>`}
+              <div class="required-token-info">
+                <strong>${escapeHtml(token.name)}</strong>
+                <small>${escapeHtml(tokenPrintIdentifier(token))}</small>
+                <small>Erzeugt durch: ${token.source_names.map(escapeHtml).join(", ")}</small>
+              </div>
+              <span class="required-token-state ${tone}">${status}</span>
+              ${Number(token.listed_quantity || 0) === 0 ? `<button class="secondary" type="button" onclick="addToDeckFlow(${token.card_id}, event)">Zum Deck</button>` : `<small class="required-token-listed">${token.listed_quantity}x eingeplant</small>`}
+            </article>`;
+        }).join("")}
+      </div>
+    </section>`;
+}
+
+function accessoriesBlock(items, publicView = false) {
+  if (!items.length) return "";
+  const categories = [
+    ["ability_counter", "Fähigkeitsmarker", "A"],
+    ["counter", "Weitere Marker", "+"],
+    ["game_aid", "Weitere Spielhilfen", "Z"],
+  ];
+  return `
+    <section class="accessory-block${publicView ? " public-accessory-block public-deck-section" : ""}">
+      <div class="accessory-head">
+        <div><h3>Zubehör</h3></div>
+        <span>${items.length} Hinweise</span>
+      </div>
+      ${categories.map(([key, label, symbol]) => {
+        const matches = items.filter((item) => item.category === key);
+        if (!matches.length) return "";
+        return `
+          <div class="accessory-group">
+            <h4>${label}</h4>
+            <div class="accessory-list">
+              ${matches.map((item) => `
+                <article class="accessory-row">
+                  <span class="accessory-symbol accessory-${key}">${symbol}</span>
+                  <div><strong>${escapeHtml(item.name)}</strong><small>Benötigt durch: ${item.source_names.map(escapeHtml).join(", ")}</small></div>
+                </article>`).join("")}
+            </div>
+          </div>`;
+      }).join("")}
+    </section>`;
 }
 
 function statusMetric(icon, value, label, tone) {
@@ -1072,7 +2740,7 @@ function shoppingListBlock(title, items, kind) {
     <div class="shopping-list ${kind}">
       ${items.map((item) => `
         <a class="shopping-row" href="${escapeHtml(item.cardmarket_url)}" target="_blank" rel="noopener noreferrer">
-          <span><strong>${item.quantity}x</strong> ${escapeHtml(item.name)}</span>
+          <span><strong>${item.quantity}x</strong> ${escapeHtml(item.name)}${item.zone === "sideboard" ? " (Sideboard)" : ""}</span>
           <span>Cardmarket</span>
         </a>
       `).join("")}
@@ -1080,12 +2748,12 @@ function shoppingListBlock(title, items, kind) {
   `;
 }
 
-async function assignFreeCopiesToDeck(cardId = null) {
+async function assignFreeCopiesToDeck(cardId = null, scope = "cards") {
   const deckId = selectedDeckId();
   if (!deckId) return;
   const result = await api(`/api/decks/${deckId}/assign-free`, {
     method: "POST",
-    body: JSON.stringify({ card_id: cardId }),
+    body: JSON.stringify({ card_id: cardId, scope }),
   });
   toast(result.assigned_count ? `${result.assigned_count} freie Karten zugewiesen.` : "Keine passenden freien Karten gefunden.");
   await Promise.all([loadCollection(), loadDeck(), loadPlanning()]);
@@ -1093,25 +2761,29 @@ async function assignFreeCopiesToDeck(cardId = null) {
 
 async function deleteSlot(slotId) {
   const deckId = selectedDeckId();
-  await api(`/api/decks/${deckId}/slots/${slotId}`, { method: "DELETE" });
+  const result = await api(`/api/decks/${deckId}/slots/${slotId}`, { method: "DELETE" });
+  if (result.freed_card_id && result.counts) {
+    updateGlobalCopyCounts(result.freed_card_id, result.counts);
+  }
   await loadDeck();
   await loadPlanning();
 }
 
-async function importDeckList() {
+async function decrementSlot(slotId, event = null) {
   const deckId = selectedDeckId();
   if (!deckId) return;
-  const result = await api(`/api/decks/${deckId}/import-list`, {
-    method: "POST",
-    body: JSON.stringify({ text: $("deckImportText").value, replace: $("replaceDeck").checked }),
-  });
-  toast(`${result.imported.length} importiert, ${result.unresolved.length} ungeklart.`);
-  await loadDeck();
-  await loadPlanning();
+  await withActionButton(event, async () => {
+    const result = await api(`/api/decks/${deckId}/slots/${slotId}/decrement`, { method: "POST" });
+    if (result.freed_card_id && result.counts) {
+      updateGlobalCopyCounts(result.freed_card_id, result.counts);
+    }
+    toast(result.removed ? "Karte aus dem Deck entfernt." : `Noch ${result.remaining_quantity}x im Deck.`);
+    await Promise.all([loadDeck(), loadPlanning()]);
+  }).catch((error) => toast(error.message));
 }
 
-async function exportDeck() {
-  const deckId = selectedDeckId();
+async function exportDeck(deckId = null) {
+  deckId = deckId || selectedDeckId();
   if (!deckId) return;
   const result = await api(`/api/decks/${deckId}/export-list`);
   $("exportText").value = result.text;
@@ -1134,7 +2806,40 @@ async function exportCollection() {
 
 function downloadBackup() {
   window.location.href = "/api/backups/download";
-  toast("Backup wird vorbereitet.");
+  toast("Vollbackup wird vorbereitet.");
+}
+
+function downloadUserBackup() {
+  window.location.href = "/api/backups/user-data";
+  toast("Datenbackup wird vorbereitet.");
+}
+
+async function importUserBackup(event) {
+  const file = $("userBackupImportFile").files[0];
+  if (!file) {
+    toast("Bitte zuerst ein Datenbackup auswaehlen.");
+    return;
+  }
+  if (!confirm("Datenbackup wirklich importieren? Sammlung und Decks werden ersetzt. Scryfall kannst du danach neu laden.")) return;
+  await withActionButton(event, async () => {
+    const response = await fetch("/api/backups/user-data/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: file,
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || response.statusText);
+    }
+    const result = await response.json();
+    $("userBackupImportFile").value = "";
+    const copies = result.counts?.card_copies ?? 0;
+    const decks = result.counts?.decks ?? 0;
+    toast(`Datenbackup importiert: ${copies} Kopien, ${decks} Decks.`);
+    await refreshBasics();
+    await Promise.all([loadCollection(true), loadDecks(), loadPlanning(), loadCollectionStats()]);
+    await loadDeck();
+  }).catch((error) => toast(error.message));
 }
 
 async function importBackup(event) {
@@ -1162,175 +2867,22 @@ async function importBackup(event) {
   }).catch((error) => toast(error.message));
 }
 
-function renderLocations() {
-  $("locationList").innerHTML = state.locations.map((location) => `
-    <article class="row-card">
-      <div>
-        <strong>${escapeHtml(location.name)}</strong>
-        <span class="muted">${escapeHtml(location.type)}</span>
-      </div>
-      <div class="row-actions">
-        <button class="icon-button" title="Oeffnen" aria-label="Oeffnen" onclick="openLocationDetail(${location.id})">${iconSvg("open")}</button>
-        <button class="icon-button secondary" title="Bearbeiten" aria-label="Bearbeiten" onclick="editLocation(${location.id})">${iconSvg("edit")}</button>
-        <button class="icon-button secondary danger" title="Loeschen" aria-label="Loeschen" onclick="deleteLocation(${location.id})">${iconSvg("delete")}</button>
-      </div>
-    </article>
-  `).join("") || emptyState("Noch keine Orte.");
-}
-
-async function openLocationDetail(locationId) {
-  const detail = await api(`/api/locations/${locationId}`);
-  const otherLocations = state.locations.filter((location) => location.id !== locationId && location.type !== "Deck");
-  $("locationDialogContent").innerHTML = `
-    <div class="location-detail-head">
-      <div>
-        <h2>${escapeHtml(detail.location.name)}</h2>
-        <p class="muted">${escapeHtml(detail.location.type)} - ${detail.copies.length} einzelne Copies</p>
-      </div>
-    </div>
-    <div class="location-summary">
-      ${detail.summary.map((card) => `
-        <button type="button" class="location-card-summary" onclick="openCardDetail(${card.card_id})">
-          ${card.image_url ? `<img src="${escapeHtml(card.image_url)}" alt="">` : ""}
-          <span><strong>${escapeHtml(displayName(card))}</strong><small>${card.total_count}x - ${card.owned_count || 0} Original / ${card.proxy_count || 0} Proxy</small></span>
-        </button>
-      `).join("") || emptyState("Dieser Ort ist leer.")}
-    </div>
-    <h3>Einzelne Copies</h3>
-    <div class="location-copy-list">
-      ${detail.copies.map((copy) => `
-        <div class="location-copy-row">
-          <div>
-            <strong>${escapeHtml(displayName(copy))}</strong>
-            <small>${escapeHtml(copy.mana_cost || "")} ${escapeHtml(displayType(copy))}</small>
-          </div>
-          <span class="tag ${copy.is_proxy ? "warn" : "good"}">${copy.is_proxy ? "Proxy" : "Original"}</span>
-          <select onchange="moveCopyFromLocation(${copy.id}, Number(this.value), ${locationId})">
-            <option value="">Verschieben nach...</option>
-            ${otherLocations.map((location) => `<option value="${location.id}">${escapeHtml(location.name)}</option>`).join("")}
-          </select>
-          <button type="button" class="secondary danger" onclick="deleteCopyFromLocation(${copy.id}, ${locationId})">Entfernen</button>
-        </div>
-      `).join("") || ""}
-    </div>
-  `;
-  $("locationDialog").showModal();
-}
-
-async function moveCopyFromLocation(copyId, targetLocationId, currentLocationId) {
-  if (!targetLocationId) return;
-  await patchCopy(copyId, { location_id: targetLocationId });
-  toast("Copy verschoben.");
-  await openLocationDetail(currentLocationId);
-}
-
-async function deleteCopyFromLocation(copyId, locationId) {
-  if (!confirm("Diese Copy wirklich aus deiner Sammlung entfernen?")) return;
-  await api(`/api/collection/copies/${copyId}`, { method: "DELETE" });
-  toast("Copy entfernt.");
-  await Promise.all([loadCollection(), loadDeck()]);
-  await openLocationDetail(locationId);
-}
-
-async function createLocation(event) {
-  event.preventDefault();
-  await api("/api/locations", {
-    method: "POST",
-    body: JSON.stringify({ name: $("locationName").value, type: $("locationType").value }),
-  });
-  $("locationName").value = "";
-  await refreshBasics();
-}
-
-async function editLocation(locationId) {
-  const location = state.locations.find((item) => item.id === locationId);
-  if (!location) return;
-  const name = prompt("Location:", location.name);
-  if (!name) return;
-  const type = prompt("Typ:", location.type) || location.type;
-  await api(`/api/locations/${locationId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ name, type }),
-  });
-  await refreshBasics();
-  await loadCollection();
-}
-
-async function deleteLocation(locationId) {
-  if (!confirm("Location wirklich loeschen? Das geht nur, wenn keine Copies dort liegen.")) return;
-  try {
-    await api(`/api/locations/${locationId}`, { method: "DELETE" });
-    await refreshBasics();
-    await loadCollection();
-  } catch (error) {
-    await openDeleteLocationDialog(locationId, error.message);
-  }
-}
-
-async function openDeleteLocationDialog(locationId, message) {
-  const location = state.locations.find((item) => item.id === locationId);
-  if (!location) {
-    toast(message);
-    return;
-  }
-  state.pendingDeleteLocationId = locationId;
-  const targets = state.locations.filter((item) => item.id !== locationId && item.type !== "Deck");
-  $("deleteLocationContent").innerHTML = `
-    <h2>${escapeHtml(location.name)} loeschen</h2>
-    <p class="muted">Dieser Ort enthaelt noch Karten. Was soll mit diesen Copies passieren?</p>
-    <div class="delete-location-actions">
-      <label>
-        Karten verschieben nach
-        <select id="deleteLocationMoveTarget">
-          ${targets.map((target) => `<option value="${target.id}">${escapeHtml(target.name)}</option>`).join("")}
-        </select>
-      </label>
-      <button type="button" ${targets.length ? "" : "disabled"} onclick="confirmDeleteLocationMove()">Verschieben und Ort loeschen</button>
-      <button type="button" class="secondary" onclick="confirmDeleteLocationDetach()">Karten behalten ohne Ort</button>
-    </div>
-  `;
-  $("deleteLocationDialog").showModal();
-}
-
-async function confirmDeleteLocationMove() {
-  const locationId = state.pendingDeleteLocationId;
-  const targetId = Number($("deleteLocationMoveTarget").value);
-  if (!locationId || !targetId) return;
-  await api(`/api/locations/${locationId}?move_to_location_id=${targetId}`, { method: "DELETE" });
-  $("deleteLocationDialog").close();
-  toast("Ort geloescht, Karten verschoben.");
-  await refreshBasics();
-  await loadCollection();
-}
-
-async function confirmDeleteLocationDetach() {
-  const locationId = state.pendingDeleteLocationId;
-  if (!locationId) return;
-  await api(`/api/locations/${locationId}?detach_copies=true`, { method: "DELETE" });
-  $("deleteLocationDialog").close();
-  toast("Ort geloescht, Karten behalten.");
-  await refreshBasics();
-  await loadCollection();
-}
-
 window.openCardDetail = openCardDetail;
 window.addToDeckFlow = addToDeckFlow;
 window.quickAddCopy = quickAddCopy;
+window.addOriginalToDeck = addOriginalToDeck;
 window.patchCopy = patchCopy;
 window.deleteCopy = deleteCopy;
 window.moveCopyToCollection = moveCopyToCollection;
 window.resolveDecision = resolveDecision;
 window.selectDeck = selectDeck;
+window.exportDeck = exportDeck;
 window.editDeck = editDeck;
 window.deleteDeck = deleteDeck;
+window.setDeckCover = setDeckCover;
+window.decrementSlot = decrementSlot;
 window.deleteSlot = deleteSlot;
-window.editLocation = editLocation;
-window.deleteLocation = deleteLocation;
-window.openLocationDetail = openLocationDetail;
-window.moveCopyFromLocation = moveCopyFromLocation;
-window.deleteCopyFromLocation = deleteCopyFromLocation;
-window.confirmDeleteLocationMove = confirmDeleteLocationMove;
-window.confirmDeleteLocationDetach = confirmDeleteLocationDetach;
+window.moveSlotZone = moveSlotZone;
 window.showCardPreview = showCardPreview;
 window.moveCardPreview = moveCardPreview;
 window.hideCardPreview = hideCardPreview;

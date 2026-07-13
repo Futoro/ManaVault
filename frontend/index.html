@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ManaVault</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260709-mobile-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260713-deck-variants" />
   </head>
   <body>
     <header class="topbar">
@@ -16,8 +16,8 @@
         <button class="tab" data-page="statsPage">Stats</button>
         <button class="tab" data-page="decksPage">Decks</button>
         <button class="tab" data-page="planningPage">Planung</button>
-        <button class="tab" data-page="locationsPage">Orte</button>
-        <button class="tab" data-page="backupPage">Backup</button>
+        <button class="tab" data-page="historyPage">Historie</button>
+        <button class="tab" data-page="backupPage">Daten</button>
       </nav>
     </header>
     <div id="importStatus" class="import-status" hidden>
@@ -31,22 +31,20 @@
           <div class="section-head collection-head">
             <div>
               <h2>Sammlung</h2>
-              <p>Eine Karte pro Druck, mit Menge und Wert.</p>
+              <button id="openCardScanner" class="scan-open" type="button">Karte scannen</button>
             </div>
             <div class="search-scope-wrap">
-              <input id="collectionSearch" type="search" placeholder="Sammlung suchen..." autocomplete="off" />
+              <input id="collectionSearch" type="search" placeholder="Name / Kennung" autocomplete="off" />
               <label class="scope-toggle" title="In allen Scryfall-Karten suchen" aria-label="In allen Scryfall-Karten suchen">
                 <input id="collectionSearchAllCards" type="checkbox" />
                 <span class="scope-toggle-icon" aria-hidden="true"></span>
+                <span id="collectionScopeLabel" class="scope-toggle-label">Sammlung</span>
               </label>
             </div>
-            <div class="collection-actions">
-              <select id="collectionExportFormat" aria-label="Export Format">
-                <option value="jsonl">JSONL</option>
-                <option value="markdown">Markdown</option>
-              </select>
-              <button id="exportCollection" class="secondary icon-button" type="button" title="Sammlung exportieren" aria-label="Sammlung exportieren">v</button>
-            </div>
+            <label class="active-deck-wrap">
+              <span>Aktives Deck</span>
+              <select id="collectionActiveDeck"></select>
+            </label>
           </div>
           <div class="filterbar compact">
             <div class="color-filters" aria-label="Sammlungsfarben">
@@ -68,6 +66,7 @@
               <option value="Enchantment">Enchantment</option>
               <option value="Planeswalker">Planeswalker</option>
               <option value="Land">Land</option>
+              <option value="Token">Token</option>
             </select>
             <select id="collectionTagFilter">
               <option value="">Alle Tags</option>
@@ -91,6 +90,12 @@
             </select>
             <select id="collectionSetFilter">
               <option value="">Alle Sets</option>
+            </select>
+            <select id="collectionLangFilter">
+              <option value="en,de">Deutsch + Englisch</option>
+              <option value="de">Nur Deutsch</option>
+              <option value="en">Nur Englisch</option>
+              <option value="all">Alle Sprachen</option>
             </select>
             <input id="collectionMinPrice" type="number" min="0" step="0.5" placeholder="EUR min" />
             <select id="collectionSort">
@@ -120,18 +125,17 @@
           <div class="section-head">
             <div>
               <h2>Stats</h2>
-              <p>Ueberblick ueber deine Sammlung.</p>
             </div>
-            <button id="refreshStats" class="icon-button" title="Aktualisieren" aria-label="Aktualisieren">r</button>
           </div>
-          <div id="collectionStats" class="stats-view"></div>
+          <div id="collectionStats" class="stats-view">
+            <div class="empty">Lade...</div>
+          </div>
         </section>
 
         <section id="decksPage" class="page">
           <div class="section-head">
             <div>
               <h2>Decks</h2>
-              <p>Decks erstellen, bearbeiten, exportieren und pruefen.</p>
             </div>
             <form id="deckForm" class="toolbar">
               <input id="deckName" placeholder="Deckname" required />
@@ -140,102 +144,278 @@
               <button id="openDeckBuilder" class="icon-button secondary" type="button" title="Deckbuilder oeffnen" aria-label="Deckbuilder oeffnen">o</button>
             </form>
           </div>
-          <div id="deckList" class="list"></div>
+          <div class="filterbar compact deck-filterbar">
+            <input id="deckSearch" type="search" placeholder="Decks suchen..." autocomplete="off" />
+            <div class="color-filters" aria-label="Deckfarben">
+              <button class="manaFilter deckListManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
+            </div>
+            <select id="deckFormatFilter">
+              <option value="">Alle Formate</option>
+            </select>
+            <select id="deckTypeFilter">
+              <option value="">Alle Typen</option>
+              <option value="Creature">Creature</option>
+              <option value="Instant">Instant</option>
+              <option value="Sorcery">Sorcery</option>
+              <option value="Artifact">Artifact</option>
+              <option value="Enchantment">Enchantment</option>
+              <option value="Planeswalker">Planeswalker</option>
+              <option value="Land">Land</option>
+            </select>
+            <select id="deckSort">
+              <option value="name">Name A-Z</option>
+              <option value="cards">Karten hoch</option>
+              <option value="value">Wert hoch</option>
+              <option value="format">Format</option>
+            </select>
+            <button id="clearDeckFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
+          </div>
+          <div id="deckMeta" class="browser-meta"></div>
+          <div id="deckList" class="deck-overview-grid"></div>
         </section>
 
-        <section id="locationsPage" class="page">
-          <div class="section-head">
-            <div>
-              <h2>Orte</h2>
-              <p>Boxen, Binder und Deck-Orte verwalten.</p>
+        <section id="deckBuilderPage" class="page deck-builder-page">
+          <div id="builderPanel" class="builder">
+            <div class="section-head deck-builder-head">
+              <div>
+                <h2>Deckbuilder</h2>
+                <select id="deckSelect"></select>
+              </div>
+              <div class="builder-tools">
+                <button id="deckQrButton" class="icon-button secondary" type="button" title="QR-Code erstellen" aria-label="QR-Code erstellen">QR</button>
+                <button id="backToDecks" class="icon-button secondary" type="button" title="Zurueck zu Decks" aria-label="Zurueck zu Decks">x</button>
+              </div>
             </div>
-            <form id="locationForm" class="toolbar">
-              <input id="locationName" placeholder="Name, z.B. Box 1" required />
-              <input id="locationType" placeholder="Typ, z.B. Box" value="Box" />
-              <button class="icon-button" title="Ort anlegen" aria-label="Ort anlegen">+</button>
-            </form>
+
+            <div id="deckVariantBar" class="deck-variant-bar">
+              <label>
+                <span>Variante</span>
+                <select id="deckVariantSelect" aria-label="Deckvariante"></select>
+              </label>
+              <span id="deckEditState" class="deck-edit-state">Keine offenen Änderungen</span>
+              <div class="deck-variant-actions">
+                <button id="discardDeckChanges" class="secondary" type="button">Verwerfen</button>
+                <button id="saveDeckChanges" type="button">Speichern</button>
+                <button id="saveDeckAsVariant" class="secondary" type="button">Als neue Variante</button>
+              </div>
+            </div>
+
+            <div id="deckBuilderWorkbench" class="deck-workbench">
+              <section class="deck-workbench-pane">
+                <div class="pane-head">
+                  <h3>Sammlung</h3>
+                  <span id="deckBuilderCollectionMeta" class="muted"></span>
+                </div>
+                <div class="builder-search-panel">
+                  <div class="search-scope-wrap builder-search-wrap">
+                    <input id="deckBuilderSearch" type="search" placeholder="Name / Kennung" autocomplete="off" />
+                    <label class="scope-toggle" title="In allen Scryfall-Karten suchen" aria-label="In allen Scryfall-Karten suchen">
+                      <input id="deckBuilderSearchAllCards" type="checkbox" />
+                      <span class="scope-toggle-icon builder-scope-toggle-icon" aria-hidden="true"></span>
+                      <span id="deckBuilderScopeLabel" class="scope-toggle-label">Sammlung</span>
+                    </label>
+                  </div>
+                  <div class="filterbar compact builder-filterbar">
+                    <div class="color-filters" aria-label="Deckbuilder Farben">
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
+                    </div>
+                    <input id="deckBuilderCmcMin" type="number" min="0" step="1" placeholder="MV min" />
+                    <input id="deckBuilderCmcMax" type="number" min="0" step="1" placeholder="MV max" />
+                    <select id="deckBuilderTypeFilter">
+                      <option value="">Alle Typen</option>
+                      <option value="Creature">Creature</option>
+                      <option value="Instant">Instant</option>
+                      <option value="Sorcery">Sorcery</option>
+                      <option value="Artifact">Artifact</option>
+                      <option value="Enchantment">Enchantment</option>
+                      <option value="Planeswalker">Planeswalker</option>
+                      <option value="Land">Land</option>
+                      <option value="Token">Token</option>
+                    </select>
+                    <select id="deckBuilderTagFilter">
+                      <option value="">Alle Tags</option>
+                    </select>
+                    <select id="deckBuilderLegalFilter">
+                      <option value="">Alle Formate</option>
+                      <option value="standard">Standard legal</option>
+                      <option value="pioneer">Pioneer legal</option>
+                      <option value="modern">Modern legal</option>
+                      <option value="legacy">Legacy legal</option>
+                      <option value="vintage">Vintage legal</option>
+                      <option value="commander">Commander legal</option>
+                      <option value="pauper">Pauper legal</option>
+                    </select>
+                    <select id="deckBuilderRarityFilter">
+                      <option value="">Alle Seltenheiten</option>
+                      <option value="common">Common</option>
+                      <option value="uncommon">Uncommon</option>
+                      <option value="rare">Rare</option>
+                      <option value="mythic">Mythic</option>
+                    </select>
+                    <select id="deckBuilderSetFilter">
+                      <option value="">Alle Sets</option>
+                    </select>
+                    <select id="deckBuilderLangFilter">
+                      <option value="en,de">Deutsch + Englisch</option>
+                      <option value="de">Nur Deutsch</option>
+                      <option value="en">Nur Englisch</option>
+                      <option value="all">Alle Sprachen</option>
+                    </select>
+                    <input id="deckBuilderMinPrice" type="number" min="0" step="0.5" placeholder="EUR min" />
+                    <select id="deckBuilderSort">
+                      <option value="name">Name A-Z</option>
+                      <option value="name_desc">Name Z-A</option>
+                      <option value="cmc">Mana Value niedrig</option>
+                      <option value="cmc_desc">Mana Value hoch</option>
+                      <option value="value">Wert hoch</option>
+                      <option value="value_asc">Wert niedrig</option>
+                      <option value="price">Einzelpreis hoch</option>
+                      <option value="price_asc">Einzelpreis niedrig</option>
+                      <option value="count">Menge hoch</option>
+                      <option value="free">Frei hoch</option>
+                      <option value="rarity">Seltenheit hoch</option>
+                      <option value="rarity_asc">Seltenheit niedrig</option>
+                      <option value="set">Set / Nummer</option>
+                      <option value="released">Neueste Drucke</option>
+                    </select>
+                    <button id="clearDeckBuilderFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
+                  </div>
+                </div>
+                <div id="deckBuilderCollection" class="deck-builder-card-grid"></div>
+                <button id="deckBuilderLoadMore" class="load-more">Mehr Karten laden</button>
+              </section>
+              <div id="deckWorkbenchDivider" class="deck-workbench-divider" role="separator" aria-orientation="vertical" title="Ziehen zum Anpassen"></div>
+              <section class="deck-workbench-pane deck-side-pane">
+                <div id="deckStatus" class="builder-status"></div>
+                <div id="deckDetail" class="builder-list"></div>
+              </section>
+            </div>
           </div>
-          <div id="locationList" class="list"></div>
+        </section>
+
+        <section id="publicDeckPage" class="page public-deck-page">
+          <div id="publicDeckContent" class="public-deck-content">
+            <div class="empty">Lade...</div>
+          </div>
         </section>
 
         <section id="planningPage" class="page">
           <div class="section-head">
             <div>
               <h2>Planung</h2>
-              <p>Fehlende Karten, Proxy-Bedarf und Deckkonflikte.</p>
             </div>
-            <button id="refreshPlanning" class="icon-button" title="Aktualisieren" aria-label="Aktualisieren">r</button>
           </div>
           <div id="planningSummary" class="planning-summary"></div>
           <div id="planningList" class="list"></div>
         </section>
 
+        <section id="historyPage" class="page">
+          <div class="section-head">
+            <div>
+              <h2>Historie</h2>
+            </div>
+          </div>
+          <div class="history-filters">
+            <input id="historySearch" type="search" placeholder="Karte suchen..." autocomplete="off" />
+            <select id="historyAction">
+              <option value="">Alle Aktionen</option>
+              <option value="added">Hinzugefuegt</option>
+              <option value="deck_added">Ins Deck gelegt</option>
+              <option value="deck_removed">Aus Deck genommen</option>
+              <option value="deck_moved">Deck gewechselt</option>
+              <option value="moved">Verschoben</option>
+              <option value="deleted">Geloescht</option>
+            </select>
+          </div>
+          <div id="historyMeta" class="browser-meta"></div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+
         <section id="backupPage" class="page">
           <div class="section-head">
             <div>
-              <h2>Backup</h2>
-              <p>Datenbank sichern oder eine ManaVault-Sicherung einspielen.</p>
+              <h2>Daten</h2>
             </div>
           </div>
-          <div class="backup-grid">
+          <div class="data-tools">
+            <section class="data-section">
+              <div class="data-section-head">
+                <h3>ManaVault-Daten</h3>
+                <p class="muted">Ohne Scryfall</p>
+              </div>
+              <div class="backup-pair">
+                <article class="backup-panel">
+                  <div>
+                    <h3>Export</h3>
+                  </div>
+                  <button id="downloadUserBackup" class="icon-button" title="Datenbackup exportieren" aria-label="Datenbackup exportieren">v</button>
+                </article>
+                <article class="backup-panel">
+                  <div>
+                    <h3>Import</h3>
+                    <p class="muted">Scryfall danach aktualisieren.</p>
+                  </div>
+                  <input id="userBackupImportFile" class="file-input" type="file" accept=".json,application/json" />
+                  <button id="importUserBackup" class="icon-button" title="Datenbackup importieren" aria-label="Datenbackup importieren">^</button>
+                </article>
+              </div>
+            </section>
+
+            <section class="data-section">
+              <div class="data-section-head">
+                <h3>Vollbackup</h3>
+                <p class="muted">Mit Scryfall</p>
+              </div>
+              <div class="backup-pair">
+                <article class="backup-panel">
+                  <div>
+                    <h3>Export</h3>
+                  </div>
+                  <button id="downloadBackup" class="icon-button" title="Vollbackup exportieren" aria-label="Vollbackup exportieren">v</button>
+                </article>
+                <article class="backup-panel">
+                  <div>
+                    <h3>Import</h3>
+                    <p class="muted">Ersetzt alle Daten.</p>
+                  </div>
+                  <input id="backupImportFile" class="file-input" type="file" accept=".sqlite3,.db,application/vnd.sqlite3,application/octet-stream" />
+                  <button id="importBackup" class="icon-button" title="Vollbackup importieren" aria-label="Vollbackup importieren">^</button>
+                </article>
+              </div>
+            </section>
+
+            <div class="backup-grid">
             <article class="backup-panel">
               <div>
-                <h3>Export</h3>
-                <p class="muted">Speichert eine vollstaendige `.sqlite3`-Sicherung.</p>
+                <h3>Sammlung exportieren</h3>
               </div>
-              <button id="downloadBackup" class="icon-button" title="Backup exportieren" aria-label="Backup exportieren">v</button>
-            </article>
-            <article class="backup-panel">
-              <div>
-                <h3>Import</h3>
-                <p class="muted">Ersetzt die aktuelle Datenbank durch eine Sicherung.</p>
-              </div>
-              <input id="backupImportFile" class="file-input" type="file" accept=".sqlite3,.db,application/vnd.sqlite3,application/octet-stream" />
-              <button id="importBackup" class="icon-button" title="Backup importieren" aria-label="Backup importieren">^</button>
+              <select id="collectionExportFormat" aria-label="Export Format">
+                <option value="jsonl">JSONL</option>
+                <option value="markdown">Markdown</option>
+              </select>
+              <button id="exportCollection" class="icon-button" type="button" title="Sammlung exportieren" aria-label="Sammlung exportieren">v</button>
             </article>
             <article class="backup-panel">
               <div>
                 <h3>Scryfall</h3>
-                <p class="muted">Kartendaten aktualisieren.</p>
               </div>
               <button id="importScryfall" class="icon-button" title="Scryfall Import" aria-label="Scryfall Import">s</button>
             </article>
+            </div>
           </div>
         </section>
       </section>
     </main>
-
-    <dialog id="deckBuilderDialog" class="deck-builder-dialog">
-      <div id="builderPanel" class="builder dialog-body">
-        <button class="icon-close" type="button" aria-label="Schliessen" onclick="document.getElementById('deckBuilderDialog').close()">x</button>
-        <div class="builder-head">
-          <div>
-            <h2>Deckbuilder</h2>
-            <select id="deckSelect"></select>
-          </div>
-        </div>
-
-        <div class="builder-tools">
-          <button id="newDeckFromBuilder" class="icon-button" title="Deck erstellen" aria-label="Deck erstellen">+</button>
-          <button id="exportDeck" class="icon-button" title="Deck exportieren" aria-label="Deck exportieren">v</button>
-        </div>
-
-        <details class="deck-import-panel">
-          <summary>Deckliste aus Text</summary>
-          <textarea id="deckImportText" placeholder="1 Sol Ring&#10;2 Counterspell"></textarea>
-          <div class="builder-tools import-tools">
-            <label class="replace-check">
-              <input id="replaceDeck" type="checkbox" />
-              <span>Deck vorher leeren</span>
-            </label>
-            <button id="importDeck" class="icon-button" title="Liste uebernehmen" aria-label="Liste uebernehmen">^</button>
-          </div>
-        </details>
-
-        <div id="deckDetail" class="builder-list"></div>
-        <div id="deckStatus" class="builder-status"></div>
-      </div>
-    </dialog>
 
     <dialog id="cardDialog">
       <form method="dialog" class="dialog-body">
@@ -251,18 +431,55 @@
       </form>
     </dialog>
 
-    <dialog id="locationDialog">
-      <form method="dialog" class="dialog-body">
-        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
-        <div id="locationDialogContent"></div>
-      </form>
-    </dialog>
-
-    <dialog id="deleteLocationDialog">
-      <form method="dialog" class="dialog-body">
-        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
-        <div id="deleteLocationContent"></div>
-      </form>
+    <dialog id="scannerDialog" class="scanner-dialog">
+      <div class="dialog-body scanner-body">
+        <button id="closeCardScanner" class="icon-close" type="button" aria-label="Schliessen">x</button>
+        <h2>Karte scannen</h2>
+        <p class="muted">Karte vollstaendig ins Bild legen.</p>
+        <div id="scannerCamera" class="scanner-camera" hidden>
+          <video id="scannerVideo" autoplay playsinline muted></video>
+          <div class="scanner-card-guide" aria-hidden="true">
+            <span class="scanner-guide-label">KARTE VOLLSTAENDIG SICHTBAR</span>
+          </div>
+        </div>
+        <div id="scannerOcrDebug" class="scanner-ocr-debug" hidden>
+          <small>Kennung</small>
+          <img id="scannerOcrPreview" alt="Ausgewertete Set- und Sammlernummer" />
+          <small>Kartenname</small>
+          <img id="scannerOcrWidePreview" alt="Breit ausgewertete Set- und Sammlernummer" />
+        </div>
+        <button id="startLiveScanner" type="button">Live-Kamera starten</button>
+        <button id="scanLiveCard" class="scanner-scan-now" type="button" hidden>Karte jetzt scannen</button>
+        <label id="scannerCameraSelectWrap" class="scanner-camera-select" hidden>
+          <span>Kamera auswählen</span>
+          <select id="scannerCameraSelect"></select>
+        </label>
+        <button id="toggleScannerTorch" class="secondary scanner-torch" type="button" hidden>Licht einschalten</button>
+        <div id="scannerZoomControls" class="scanner-zoom" hidden>
+          <button id="scannerZoomOut" class="secondary" type="button" aria-label="Herauszoomen">−</button>
+          <label for="scannerZoom">
+            <span>Zoom <output id="scannerZoomValue">1,0×</output></span>
+            <input id="scannerZoom" type="range" min="1" max="1" step="0.1" value="1" />
+          </label>
+          <button id="scannerZoomIn" class="secondary" type="button" aria-label="Hineinzoomen">+</button>
+        </div>
+        <label class="camera-capture">
+          <input id="scannerCapture" type="file" accept="image/*" capture="environment" />
+          <span id="scannerCaptureLabel">Stattdessen Foto aufnehmen</span>
+        </label>
+        <img id="scannerPreview" class="scanner-preview" alt="Aufgenommene Karte" hidden />
+        <label>
+          <span>Kartenname oder Druckkennung</span>
+          <input id="scannerSearch" type="search" autocomplete="off" placeholder="z.B. Sol Ring, C 0088 DSK DE oder T 0007 BLB EN" />
+        </label>
+        <div id="scannerStatus" class="muted" aria-live="polite"></div>
+        <div class="scanner-report-actions">
+          <button id="reportScannerIssue" class="secondary" type="button" hidden>Fehlscan speichern</button>
+          <a class="button-link secondary" href="/api/cards/scan-reports/export">Reports herunterladen</a>
+        </div>
+        <div id="scannerResults" class="scanner-results"></div>
+        <section id="scannerChoice" class="scanner-choice" hidden></section>
+      </div>
     </dialog>
 
     <dialog id="exportDialog">
@@ -273,8 +490,28 @@
       </form>
     </dialog>
 
+    <dialog id="deckQrDialog" class="deck-qr-dialog">
+      <div class="dialog-body deck-qr-body">
+        <button id="closeDeckQr" class="icon-close" type="button" aria-label="Schliessen">x</button>
+        <h2 id="deckQrTitle">Deck QR-Code</h2>
+        <p class="muted">Oeffentlicher Nur-Lese-Link</p>
+        <div class="deck-qr-label">
+          <strong id="deckQrLabelName"></strong>
+          <img id="deckQrImage" alt="QR-Code zur Deckansicht" />
+          <small id="deckQrUrl"></small>
+        </div>
+        <div class="deck-qr-actions">
+          <button id="printDeckQr" type="button">Etikett drucken</button>
+          <a id="downloadDeckQr" class="button-link secondary" download>QR als SVG speichern</a>
+          <button id="rotateDeckShare" class="secondary" type="button">Neuen Link erzeugen</button>
+          <button id="revokeDeckShare" class="danger" type="button">Freigabe deaktivieren</button>
+        </div>
+      </div>
+    </dialog>
+
     <div id="toast"></div>
     <div id="cardPreview" class="card-preview" aria-hidden="true"></div>
-    <script src="/static/app.js?v=20260709-mobile-1"></script>
+    <div id="appVersion" class="app-version" aria-label="ManaVault Version"></div>
+    <script src="/static/app.js?v=20260713-deck-variants"></script>
   </body>
 </html>

@@ -1,0 +1,24 @@
+name: Feature-Idee
+description: Eine Verbesserung fuer ManaVault vorschlagen
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Ausgangslage
+      description: Welches konkrete Problem soll geloest werden?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Gewuenschte Loesung
+      description: Wie sollte sich ManaVault idealerweise verhalten?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativen oder Zusatzinformationen
