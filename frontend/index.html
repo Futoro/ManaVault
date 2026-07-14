@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ManaVault</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260713-deck-layout-polish" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260714-language-stats-export" />
   </head>
   <body>
     <header class="topbar">
@@ -19,10 +19,17 @@
         <button class="tab" data-page="historyPage">Historie</button>
         <button class="tab" data-page="backupPage">Daten</button>
       </nav>
+      <label class="language-picker" for="uiLanguage">
+        <span>Sprache</span>
+        <select id="uiLanguage" aria-label="Sprache">
+          <option value="de">Deutsch</option>
+          <option value="en">English</option>
+        </select>
+      </label>
     </header>
     <div id="importStatus" class="import-status" hidden>
       <span class="status-dot" aria-hidden="true"></span>
-      <span id="importStatusText">Scryfall Import laeuft.</span>
+      <span id="importStatusText">Scryfall Import läuft.</span>
     </div>
 
     <main class="workspace">
@@ -46,13 +53,18 @@
               <select id="collectionActiveDeck"></select>
             </label>
           </div>
-          <div class="filterbar compact">
+          <details class="filter-disclosure">
+            <summary>
+              <span class="filter-summary-title"><span class="filter-toggle-icon" aria-hidden="true"></span><span>Filter</span></span>
+              <small>Mana, Typ, Set und mehr</small>
+            </summary>
+            <div class="filterbar compact">
             <div class="color-filters" aria-label="Sammlungsfarben">
-              <button class="manaFilter collectionManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="W" title="Weiß" aria-label="Weiß"></button>
               <button class="manaFilter collectionManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
               <button class="manaFilter collectionManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
               <button class="manaFilter collectionManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
-              <button class="manaFilter collectionManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+              <button class="manaFilter collectionManaFilter" type="button" data-color="G" title="Grün" aria-label="Grün"></button>
               <button class="manaFilter collectionManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
             </div>
             <input id="collectionCmcMin" type="number" min="0" step="1" placeholder="MV min" />
@@ -115,7 +127,8 @@
               <option value="released">Neueste Drucke</option>
             </select>
             <button id="clearCollectionFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
-          </div>
+            </div>
+          </details>
           <div id="collectionMeta" class="browser-meta"></div>
           <div id="collectionGrid" class="card-grid"></div>
           <button id="collectionLoadMore" class="load-more">Mehr Karten laden</button>
@@ -140,18 +153,23 @@
             <form id="deckForm" class="toolbar">
               <input id="deckName" placeholder="Deckname" required />
               <input id="deckFormat" placeholder="Format" value="Commander" />
-              <button class="icon-button" title="Deck erstellen" aria-label="Deck erstellen">+</button>
-              <button id="openDeckBuilder" class="icon-button secondary" type="button" title="Deckbuilder oeffnen" aria-label="Deckbuilder oeffnen">o</button>
+              <button id="createDeck" class="icon-button" type="submit" title="Deck erstellen" aria-label="Deck erstellen">+</button>
+              <button id="openDeckBuilder" class="icon-button secondary" type="button" title="Deckbuilder öffnen" aria-label="Deckbuilder öffnen">o</button>
             </form>
           </div>
-          <div class="filterbar compact deck-filterbar">
+          <details class="filter-disclosure">
+            <summary>
+              <span class="filter-summary-title"><span class="filter-toggle-icon" aria-hidden="true"></span><span>Filter</span></span>
+              <small>Farben, Typ und Format</small>
+            </summary>
+            <div class="filterbar compact deck-filterbar">
             <input id="deckSearch" type="search" placeholder="Decks suchen..." autocomplete="off" />
             <div class="color-filters" aria-label="Deckfarben">
-              <button class="manaFilter deckListManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="W" title="Weiß" aria-label="Weiß"></button>
               <button class="manaFilter deckListManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
               <button class="manaFilter deckListManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
               <button class="manaFilter deckListManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
-              <button class="manaFilter deckListManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+              <button class="manaFilter deckListManaFilter" type="button" data-color="G" title="Grün" aria-label="Grün"></button>
               <button class="manaFilter deckListManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
             </div>
             <select id="deckFormatFilter">
@@ -174,7 +192,8 @@
               <option value="format">Format</option>
             </select>
             <button id="clearDeckFilters" class="secondary filter-reset" type="button" title="Filter leeren" aria-label="Filter leeren">x</button>
-          </div>
+            </div>
+          </details>
           <div id="deckMeta" class="browser-meta"></div>
           <div id="deckList" class="deck-overview-grid"></div>
         </section>
@@ -189,7 +208,7 @@
               </div>
               <div class="builder-tools">
                 <button id="deckQrButton" class="icon-button labeled-icon-button secondary" type="button" title="QR-Code erstellen" aria-label="QR-Code erstellen">QR-Code</button>
-                <button id="backToDecks" class="icon-button secondary" type="button" title="Zurueck zu Decks" aria-label="Zurueck zu Decks">x</button>
+                <button id="backToDecks" class="icon-button secondary" type="button" title="Zurück zu Decks" aria-label="Zurück zu Decks">x</button>
               </div>
             </div>
 
@@ -223,16 +242,16 @@
                   </div>
                   <details class="builder-filter-disclosure">
                     <summary>
-                      <span>Weitere Filter</span>
+                      <span class="filter-summary-title"><span class="filter-toggle-icon" aria-hidden="true"></span><span>Weitere Filter</span></span>
                       <small>Mana, Typ, Set und mehr</small>
                     </summary>
                     <div class="filterbar compact builder-filterbar">
                     <div class="color-filters" aria-label="Deckbuilder Farben">
-                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="W" title="Weiss" aria-label="Weiss"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="W" title="Weiß" aria-label="Weiß"></button>
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="U" title="Blau" aria-label="Blau"></button>
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="B" title="Schwarz" aria-label="Schwarz"></button>
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="R" title="Rot" aria-label="Rot"></button>
-                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="G" title="Gruen" aria-label="Gruen"></button>
+                      <button class="manaFilter deckBuilderManaFilter" type="button" data-color="G" title="Grün" aria-label="Grün"></button>
                       <button class="manaFilter deckBuilderManaFilter" type="button" data-color="C" title="Farblos" aria-label="Farblos"></button>
                     </div>
                     <input id="deckBuilderCmcMin" type="number" min="0" step="1" placeholder="MV min" />
@@ -303,6 +322,33 @@
               </section>
               <div id="deckWorkbenchDivider" class="deck-workbench-divider" role="separator" aria-orientation="vertical" title="Ziehen zum Anpassen"></div>
               <section class="deck-workbench-pane deck-side-pane">
+                <div id="deckContentsFilters" class="deck-contents-filters" hidden>
+                  <input id="deckContentsSearch" type="search" placeholder="Deck durchsuchen …" autocomplete="off" />
+                  <select id="deckContentsZone" aria-label="Deckbereich">
+                    <option value="all">Alle Bereiche</option>
+                    <option value="mainboard">Hauptdeck</option>
+                    <option value="sideboard">Sideboard</option>
+                    <option value="tokens">Tokens</option>
+                  </select>
+                  <select id="deckContentsType" aria-label="Kartentyp im Deck">
+                    <option value="">Alle Typen</option>
+                    <option value="Creature">Creature</option>
+                    <option value="Instant">Instant</option>
+                    <option value="Sorcery">Sorcery</option>
+                    <option value="Artifact">Artifact</option>
+                    <option value="Enchantment">Enchantment</option>
+                    <option value="Planeswalker">Planeswalker</option>
+                    <option value="Land">Land</option>
+                    <option value="Token">Token</option>
+                  </select>
+                  <select id="deckContentsSort" aria-label="Deck sortieren">
+                    <option value="name">Name A–Z</option>
+                    <option value="cmc">Mana Value</option>
+                    <option value="type">Kartentyp</option>
+                  </select>
+                  <button id="clearDeckContentsFilters" class="secondary" type="button" title="Deckfilter leeren" aria-label="Deckfilter leeren">×</button>
+                  <small id="deckContentsFilterMeta"></small>
+                </div>
                 <div id="deckDetail" class="builder-list"></div>
                 <div id="deckStatus" class="builder-status"></div>
               </section>
@@ -336,12 +382,12 @@
             <input id="historySearch" type="search" placeholder="Karte suchen..." autocomplete="off" />
             <select id="historyAction">
               <option value="">Alle Aktionen</option>
-              <option value="added">Hinzugefuegt</option>
+              <option value="added">Hinzugefügt</option>
               <option value="deck_added">Ins Deck gelegt</option>
               <option value="deck_removed">Aus Deck genommen</option>
               <option value="deck_moved">Deck gewechselt</option>
               <option value="moved">Verschoben</option>
-              <option value="deleted">Geloescht</option>
+              <option value="deleted">Gelöscht</option>
             </select>
           </div>
           <div id="historyMeta" class="browser-meta"></div>
@@ -424,29 +470,56 @@
       </section>
     </main>
 
+    <button id="aiChatToggle" class="ai-chat-toggle" type="button" aria-label="ManaVault Assistent öffnen">
+      <span aria-hidden="true">✦</span><span>KI</span>
+    </button>
+    <aside id="aiChatPanel" class="ai-chat-panel" aria-label="ManaVault Assistent" hidden>
+      <header class="ai-chat-header">
+        <div>
+          <strong>ManaVault Assistent</strong>
+          <small id="aiChatContext">Sammlung</small>
+        </div>
+        <div class="ai-chat-header-actions">
+          <button id="aiChatNew" class="secondary" type="button" title="Neuer Chat" aria-label="Neuer Chat">↻</button>
+          <button id="aiChatClose" class="secondary" type="button" aria-label="Schließen">×</button>
+        </div>
+      </header>
+      <div id="aiChatStatus" class="ai-chat-status" role="status"></div>
+      <div id="aiChatMessages" class="ai-chat-messages" aria-live="polite"></div>
+      <div id="aiChatSuggestions" class="ai-chat-suggestions">
+        <button class="secondary" type="button" data-ai-question="Was fällt dir an meiner Sammlung auf?">Sammlung analysieren</button>
+        <button class="secondary" type="button" data-ai-question="Welche sinnvollen Verbesserungen siehst du für dieses Deck?">Deck verbessern</button>
+      </div>
+      <form id="aiChatForm" class="ai-chat-form">
+        <textarea id="aiChatInput" rows="2" maxlength="8000" placeholder="Frage zu Sammlung, Deck oder Karten …" required></textarea>
+        <button id="aiChatSend" type="submit" aria-label="Nachricht senden">➤</button>
+      </form>
+      <small class="ai-chat-note">Antworten können Fehler enthalten. Kartendaten stammen aus deinem lokalen Scryfall-Import.</small>
+    </aside>
+
     <dialog id="cardDialog">
       <form method="dialog" class="dialog-body">
-        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <button class="icon-close" value="cancel" aria-label="Schließen">x</button>
         <div id="cardDialogContent"></div>
       </form>
     </dialog>
 
     <dialog id="decisionDialog">
       <form method="dialog" class="dialog-body">
-        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <button class="icon-close" value="cancel" aria-label="Schließen">x</button>
         <div id="decisionContent"></div>
       </form>
     </dialog>
 
     <dialog id="scannerDialog" class="scanner-dialog">
       <div class="dialog-body scanner-body">
-        <button id="closeCardScanner" class="icon-close" type="button" aria-label="Schliessen">x</button>
+        <button id="closeCardScanner" class="icon-close" type="button" aria-label="Schließen">x</button>
         <h2>Karte scannen</h2>
-        <p class="muted">Karte vollstaendig ins Bild legen.</p>
+        <p class="muted">Karte vollständig ins Bild legen.</p>
         <div id="scannerCamera" class="scanner-camera" hidden>
           <video id="scannerVideo" autoplay playsinline muted></video>
           <div class="scanner-card-guide" aria-hidden="true">
-            <span class="scanner-guide-label">KARTE VOLLSTAENDIG SICHTBAR</span>
+            <span class="scanner-guide-label">KARTE VOLLSTÄNDIG SICHTBAR</span>
           </div>
         </div>
         <div id="scannerOcrDebug" class="scanner-ocr-debug" hidden>
@@ -491,7 +564,7 @@
 
     <dialog id="exportDialog">
       <form method="dialog" class="dialog-body">
-        <button class="icon-close" value="cancel" aria-label="Schliessen">x</button>
+        <button class="icon-close" value="cancel" aria-label="Schließen">x</button>
         <h2>Deck Export</h2>
         <textarea id="exportText" readonly></textarea>
       </form>
@@ -499,9 +572,9 @@
 
     <dialog id="deckQrDialog" class="deck-qr-dialog">
       <div class="dialog-body deck-qr-body">
-        <button id="closeDeckQr" class="icon-close" type="button" aria-label="Schliessen">x</button>
+        <button id="closeDeckQr" class="icon-close" type="button" aria-label="Schließen">x</button>
         <h2 id="deckQrTitle">Deck QR-Code</h2>
-        <p class="muted">Oeffentlicher Nur-Lese-Link</p>
+        <p class="muted">Öffentlicher Nur-Lese-Link</p>
         <div class="deck-qr-label">
           <strong id="deckQrLabelName"></strong>
           <img id="deckQrImage" alt="QR-Code zur Deckansicht" />
@@ -519,6 +592,6 @@
     <div id="toast"></div>
     <div id="cardPreview" class="card-preview" aria-hidden="true"></div>
     <div id="appVersion" class="app-version" aria-label="ManaVault Version"></div>
-    <script src="/static/app.js?v=20260713-deck-layout-polish"></script>
+    <script src="/static/app.js?v=20260714-deck-actions-two-rows"></script>
   </body>
 </html>

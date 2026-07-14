@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.86 - 2026-07-14
+
+- Kontextabhängiger OpenAI-Assistent für Sammlung, Decks, Sets und lokale Scryfall-Daten.
+- Der Assistent kann alternativ und vollständig optional mit einem lokalen Ollama-Modell ohne API-Kosten betrieben werden; die Standardinstallation bleibt KI-frei.
+- Optionale deutsche und englische Oberfläche sowie Export fehlender Setkarten.
+- Überarbeitete Symbole, aufklappbare Filter und eindeutiges Zurücksetzen-Symbol.
+- Plus- und Minus-Steuerung direkt an Deckkarten sowie ein klareres Sideboard-Symbol.
+- Das Installationsskript erkennt vorhandene Installationen, sichert die Datenbank und aktualisiert ausschließlich Programmdateien; Sammlung, Decks, Login und API-Schlüssel bleiben erhalten.
+
 ## 0.1.85 - 2026-07-13
 
 - Das Repository ist auf den Linux-Serverbetrieb fokussiert und enthaelt keine veralteten Windows-Batches oder historischen Update-Pakete mehr.

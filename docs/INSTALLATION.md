@@ -33,10 +33,10 @@ Alternativ kann das GitHub-Quellpaket entpackt werden. Der Projektordner darf be
 ## 2. Dienste installieren
 
 ```bash
-sudo ./scripts/install.sh
+bash INSTALLIEREN.sh
 ```
 
-Das Skript erstellt `.venv`, installiert die Python-Abhaengigkeiten und richtet drei systemd-Dienste ein:
+Das Skript erstellt `.venv`, installiert die Python-Abhaengigkeiten und richtet drei systemd-Dienste ein. Bei einer vorhandenen Installation erkennt es deren Arbeitsordner, erstellt zuerst ein Datenbankbackup und ersetzt ausschliesslich Programmdateien. `data/` mit Sammlung, Decks, Login und API-Schluessel bleibt unveraendert.
 
 | Dienst | Adresse | Zweck |
 |---|---|---|
@@ -107,13 +107,12 @@ Vor jeder Aktualisierung zuerst sichern:
 
 ```bash
 cd ~/ManaVault
-./scripts/backup.sh
 git pull --ff-only
-sudo ./scripts/install.sh
+bash INSTALLIEREN.sh
 ./scripts/import-scryfall.sh --tokens-only
 ```
 
-Bei einer Installation aus einem GitHub-Quellpaket muss der neue Quellcode ueber die alten Programmdateien kopiert werden. Der komplette Ordner `data/` muss dabei erhalten bleiben.
+Bei einem entpackten ZIP kann `bash INSTALLIEREN.sh` direkt im neuen Paketordner ausgefuehrt werden. Das Skript aktualisiert die vom laufenden Dienst verwendete Installation und beruehrt deren `data/`-Ordner nicht.
 
 ## Deinstallation
 

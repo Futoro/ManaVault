@@ -49,6 +49,17 @@ const state = {
   scannerWaitingForChange: false,
   scannerLastReport: null,
   quickAddBursts: new Map(),
+  deckContentsDeckId: null,
+  deckDetailData: null,
+  deckStatusData: null,
+  deckContentsSearch: "",
+  deckContentsZone: "all",
+  deckContentsType: "",
+  deckContentsSort: "name",
+  aiConfigured: false,
+  aiBusy: false,
+  aiHistory: [],
+  aiContextKey: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -70,6 +81,332 @@ const rarityLabels = {
   bonus: "Bonus",
   unknown: "Unbekannt",
 };
+
+const UI_LANGUAGE_KEY = "manavault-ui-language";
+const UI_LANGUAGE = localStorage.getItem(UI_LANGUAGE_KEY) === "en" ? "en" : "de";
+const EN_TEXT = {
+  "Sprache": "Language",
+  "Deutsch": "German",
+  "Hauptbereiche": "Main sections",
+  "Sammlung": "Collection",
+  "Karte scannen": "Scan card",
+  "Stats": "Stats",
+  "Decks": "Decks",
+  "Planung": "Planning",
+  "Historie": "History",
+  "Daten": "Data",
+  "Aktives Deck": "Active deck",
+  "Kein Deck": "No deck",
+  "Name / Kennung": "Name / identifier",
+  "In allen Scryfall-Karten suchen": "Search all Scryfall cards",
+  "Sammlungsfarben": "Collection colors",
+  "Deckfarben": "Deck colors",
+  "Deckbuilder Farben": "Deck builder colors",
+  "Weiß": "White",
+  "Blau": "Blue",
+  "Schwarz": "Black",
+  "Rot": "Red",
+  "Grün": "Green",
+  "Farblos": "Colorless",
+  "Einfarbig": "Monocolored",
+  "Mehrfarbig": "Multicolored",
+  "Alle Typen": "All types",
+  "Alle Tags": "All tags",
+  "Alle Formate": "All formats",
+  "Alle Seltenheiten": "All rarities",
+  "Alle Sets": "All sets",
+  "Deutsch + Englisch": "German + English",
+  "Nur Deutsch": "German only",
+  "Nur Englisch": "English only",
+  "Alle Sprachen": "All languages",
+  "Name A-Z": "Name A-Z",
+  "Name Z-A": "Name Z-A",
+  "Mana Value niedrig": "Mana value low",
+  "Mana Value hoch": "Mana value high",
+  "Wert hoch": "Value high",
+  "Wert niedrig": "Value low",
+  "Einzelpreis hoch": "Unit price high",
+  "Einzelpreis niedrig": "Unit price low",
+  "Menge hoch": "Quantity high",
+  "Frei hoch": "Available high",
+  "Seltenheit hoch": "Rarity high",
+  "Seltenheit niedrig": "Rarity low",
+  "Set / Nummer": "Set / number",
+  "Neueste Drucke": "Newest prints",
+  "Filter leeren": "Clear filters",
+  "Mehr Karten laden": "Load more cards",
+  "Deckname": "Deck name",
+  "Deck erstellen": "Create deck",
+  "Deckbuilder öffnen": "Open deck builder",
+  "Decks suchen...": "Search decks...",
+  "Karten hoch": "Most cards",
+  "Deck bearbeiten": "Edit deck",
+  "Variante": "Variant",
+  "Keine offenen Änderungen": "No unsaved changes",
+  "Verwerfen": "Discard",
+  "Speichern": "Save",
+  "Als neue Variante": "Save as new variant",
+  "Weitere Filter": "More filters",
+  "Farben, Typ und Format": "Colors, type, and format",
+  "Mana, Typ, Set und mehr": "Mana, type, set and more",
+  "Zurück zu Decks": "Back to decks",
+  "QR-Code erstellen": "Create QR code",
+  "Einkauf": "Shopping",
+  "Noch keine Daten.": "No data yet.",
+  "Karte suchen...": "Search cards...",
+  "Alle Aktionen": "All actions",
+  "Hinzugefügt": "Added",
+  "Ins Deck gelegt": "Added to deck",
+  "Aus Deck genommen": "Removed from deck",
+  "Deck gewechselt": "Moved between decks",
+  "Verschoben": "Moved",
+  "Gelöscht": "Deleted",
+  "ManaVault-Daten": "ManaVault data",
+  "Ohne Scryfall": "Without Scryfall",
+  "Export": "Export",
+  "Import": "Import",
+  "Scryfall danach aktualisieren.": "Update Scryfall afterwards.",
+  "Vollbackup": "Full backup",
+  "Mit Scryfall": "Including Scryfall",
+  "Ersetzt alle Daten.": "Replaces all data.",
+  "Sammlung exportieren": "Export collection",
+  "Scryfall Import": "Scryfall import",
+  "Schließen": "Close",
+  "Karte vollständig ins Bild legen.": "Keep the entire card in frame.",
+  "KARTE VOLLSTÄNDIG SICHTBAR": "ENTIRE CARD VISIBLE",
+  "Live-Kamera starten": "Start live camera",
+  "Karte jetzt scannen": "Scan card now",
+  "Kamera auswählen": "Select camera",
+  "Licht einschalten": "Turn on light",
+  "Stattdessen Foto aufnehmen": "Take a photo instead",
+  "Kartenname oder Druckkennung": "Card name or print identifier",
+  "Fehlscan speichern": "Save failed scan",
+  "Reports herunterladen": "Download reports",
+  "Herauszoomen": "Zoom out",
+  "Hineinzoomen": "Zoom in",
+  "Deck Export": "Deck export",
+  "Öffentlicher Nur-Lese-Link": "Public read-only link",
+  "Etikett drucken": "Print label",
+  "QR als SVG speichern": "Save QR as SVG",
+  "Neuen Link erzeugen": "Create new link",
+  "Freigabe deaktivieren": "Disable sharing",
+  "Lade...": "Loading...",
+  "Copies gesamt": "Total copies",
+  "Unterschiedliche Drucke": "Unique prints",
+  "Originale": "Originals",
+  "Proxies": "Proxies",
+  "Sammlungswert": "Collection value",
+  "Preis-Fallback": "Price fallback",
+  "über englische Preise": "using English prices",
+  "Farben": "Colors",
+  "Farbstruktur": "Color distribution",
+  "Seltenheit": "Rarity",
+  "Höchster Sammlungswert": "Highest collection value",
+  "Noch keine Karten mit Wert gefunden.": "No cards with a value yet.",
+  "Drucke": "prints",
+  "Fehlende Beispiele": "Missing examples",
+  "Fehlende CSV": "Missing CSV",
+  "Noch keine Set-Daten.": "No set data yet.",
+  "Deck-Werte": "Deck values",
+  "Kartenpositionen": "card slots",
+  "Deckliste": "Deck list",
+  "Fehlt": "Missing",
+  "Noch keine Decks.": "No decks yet.",
+  "Original hinzufügen": "Add original",
+  "Proxy hinzufügen": "Add proxy",
+  "Original hinzufügen und ins Deck": "Add original and put in deck",
+  "Ins Deck": "Add to deck",
+  "Öffnen": "Open",
+  "Bearbeiten": "Edit",
+  "Löschen": "Delete",
+  "Deck exportieren": "Export deck",
+  "Als Deckblatt setzen": "Set as cover",
+  "Eine Karte entfernen": "Remove one card",
+  "Aus Deckliste entfernen": "Remove from deck list",
+  "Ins Hauptdeck": "Move to main deck",
+  "Ins Sideboard": "Move to sideboard",
+  "Vorhanden": "Owned",
+  "Vollständig": "Complete",
+  "Noch benötigt": "Still needed",
+  "Benötigte Tokens": "Required tokens",
+  "Erzeugt durch:": "Created by:",
+  "Zubehör": "Accessories",
+  "Fähigkeitsmarker": "Ability counters",
+  "Weitere Marker": "Other counters",
+  "Weitere Spielhilfen": "Other game aids",
+  "Deckkarten": "Deck cards",
+  "Notizen": "Notes",
+  "Menge erhöhen": "Increase quantity",
+  "Menge verringern": "Decrease quantity",
+  "Scryfall Import gestartet.": "Scryfall import started.",
+  "Scryfall Import fehlgeschlagen.": "Scryfall import failed.",
+  "Bitte zuerst ein Deck auswählen.": "Please select a deck first.",
+  "Öffentliche Adresse noch nicht eingerichtet.": "Public address has not been configured yet.",
+  "Neuer Freigabelink erstellt.": "New sharing link created.",
+  "Freigabe deaktiviert.": "Sharing disabled.",
+  "Proxy hinzugefügt.": "Proxy added.",
+  "Original hinzugefügt.": "Original added.",
+  "Bitte im Deckbuilder ein Deck auswählen.": "Please select a deck in the deck builder.",
+  "Bitte oben in der Sammlung ein aktives Deck auswählen.": "Please select an active deck in the collection above.",
+  "Copy gelöscht.": "Copy deleted.",
+  "Deck aktualisiert.": "Deck updated.",
+  "Deckänderungen gespeichert.": "Deck changes saved.",
+  "Änderungen verworfen.": "Changes discarded.",
+  "Karte ins Sideboard verschoben.": "Card moved to sideboard.",
+  "Karte ins Hauptdeck verschoben.": "Card moved to main deck.",
+  "Deckblatt gesetzt.": "Cover set.",
+  "Keine passenden freien Karten gefunden.": "No matching available cards found.",
+  "Karte aus dem Deck entfernt.": "Card removed from deck.",
+  "Vollbackup wird vorbereitet.": "Preparing full backup.",
+  "Datenbackup wird vorbereitet.": "Preparing data backup.",
+  "Bitte zuerst ein Datenbackup auswählen.": "Please select a data backup first.",
+  "Bitte zuerst eine Backup-Datei auswählen.": "Please select a backup file first.",
+  "Backup importiert.": "Backup imported.",
+  "Welche Karte oder Druckkennung wäre richtig? (optional)": "Which card or print identifier would be correct? (optional)",
+  "Der bisherige QR-Code funktioniert danach nicht mehr. Neuen Link erzeugen?": "The previous QR code will stop working. Create a new link?",
+  "Diesen Freigabelink deaktivieren?": "Disable this sharing link?",
+  "Deckname:": "Deck name:",
+  "Deck wirklich löschen? Zugewiesene Copies bleiben in der Sammlung.": "Delete this deck? Assigned copies remain in the collection.",
+  "Alle Änderungen seit dem Öffnen verwerfen?": "Discard all changes made since opening?",
+  "Name der neuen Variante:": "Name of the new variant:",
+  "Es gibt ungespeicherte Änderungen. Verwerfen und die gewählte Variante aktivieren?": "There are unsaved changes. Discard them and activate the selected variant?",
+  "Datenbackup wirklich importieren? Sammlung und Decks werden ersetzt. Scryfall kannst du danach neu laden.": "Import this data backup? The collection and decks will be replaced. You can reload Scryfall afterwards.",
+  "Backup wirklich importieren? Die aktuelle Datenbank wird vorher automatisch gesichert und dann ersetzt.": "Import this backup? The current database will be backed up automatically and then replaced.",
+  "ManaVault Assistent öffnen": "Open ManaVault assistant",
+  "ManaVault Assistent": "ManaVault Assistant",
+  "Neuer Chat": "New chat",
+  "Sammlung analysieren": "Analyze collection",
+  "Deck verbessern": "Improve deck",
+  "Frage zu Sammlung, Deck oder Karten …": "Ask about your collection, deck, or cards …",
+  "Nachricht senden": "Send message",
+  "Antworten können Fehler enthalten. Kartendaten stammen aus deinem lokalen Scryfall-Import.": "Answers may contain errors. Card data comes from your local Scryfall import.",
+  "Der Assistent ist bereit.": "The assistant is ready.",
+  "Der optionale Assistent ist nicht eingerichtet.": "The optional assistant has not been configured.",
+  "Der OpenAI-API-Schlüssel ist noch nicht eingerichtet.": "The OpenAI API key has not been configured yet.",
+  "Richte den Schlüssel auf dem ManaVault-Server ein, um den Assistenten zu verwenden.": "Configure the key on the ManaVault server to use the assistant.",
+  "Schreibt …": "Writing …",
+  "Was fällt dir an meiner Sammlung auf?": "What stands out about my collection?",
+  "Welche sinnvollen Verbesserungen siehst du für dieses Deck?": "What useful improvements do you see for this deck?",
+  "Frag mich nach Karten in deiner Sammlung, fehlenden Setkarten oder dem aktuell geöffneten Deck.": "Ask me about cards in your collection, missing set cards, or the currently open deck.",
+  "Eine Karte hinzufügen": "Add one card",
+  "Deck durchsuchen …": "Search deck …",
+  "Deckbereich": "Deck section",
+  "Alle Bereiche": "All sections",
+  "Kartentyp im Deck": "Card type in deck",
+  "Deck sortieren": "Sort deck",
+  "Kartentyp": "Card type",
+  "Deckfilter leeren": "Clear deck filters",
+  "Keine Karte im Deck passt zu dieser Suche.": "No card in the deck matches this search.",
+};
+
+function translateEnglishText(value) {
+  const leading = value.match(/^\s*/)?.[0] || "";
+  const trailing = value.match(/\s*$/)?.[0] || "";
+  const text = value.trim();
+  if (!text) return value;
+  let translated = EN_TEXT[text] || text;
+  const patterns = [
+    [/^1 Karten$/, "1 card"],
+    [/^1 Originale$/, "1 original"],
+    [/^1 Proxies$/, "1 proxy"],
+    [/^(\d+) Karten$/, "$1 cards"],
+    [/^(\d+) Karte$/, "$1 card"],
+    [/^(\d+) Drucke$/, "$1 prints"],
+    [/^(\d+) Originale$/, "$1 originals"],
+    [/^(\d+) Originale mit Preis$/, "$1 originals with a price"],
+    [/^(\d+) Proxies$/, "$1 proxies"],
+    [/^(\d+) fehlen$/, "$1 missing"],
+    [/^(\d+) offen$/, "$1 open"],
+    [/^(\d+) Hinweise$/, "$1 notes"],
+    [/^(\d+) fehlende Karten exportiert\.$/, "$1 missing cards exported."],
+    [/^(\d+) Karten importiert\.$/, "$1 cards imported."],
+    [/^Scanner-Report (.+) gespeichert\.$/, "Scanner report $1 saved."],
+    [/^(.+) als Original hinzugefügt und ins Deck gelegt\.$/, "$1 added as an original and put in the deck."],
+    [/^(.+) wurde dem Deck hinzugefügt\.$/, "$1 was added to the deck."],
+    [/^Variante „(.+)“ gespeichert und aktiviert\.$/, "Variant “$1” saved and activated."],
+    [/^(.+) aktiviert · (\d+) Karten fehlen\.$/, "$1 activated · $2 cards missing."],
+    [/^Noch (\d+)x im Deck\.$/, "$1x remaining in the deck."],
+    [/^Jetzt (\d+)x im Deck\.$/, "Now $1x in the deck."],
+    [/^Export gespeichert: (.+)$/, "Export saved: $1"],
+    [/^(.+ - \d+\/\d+) Drucke$/, "$1 prints"],
+    [/^(.+) - (\d+) Kartenpositionen$/, "$1 - $2 card slots"],
+    [/^(\d+) Kartenpositionen$/, "$1 card slots"],
+    [/^(\d+) von (\d+) Kartenpositionen$/, "$1 of $2 card slots"],
+    [/^Erzeugt durch: (.+)$/, "Created by: $1"],
+    [/^Benötigt durch: (.+)$/, "Required by: $1"],
+    [/^QR-Code für (.+)$/, "QR code for $1"],
+  ];
+  for (const [pattern, replacement] of patterns) translated = translated.replace(pattern, replacement);
+  return `${leading}${translated}${trailing}`;
+}
+
+function uiText(value) {
+  return UI_LANGUAGE === "en" ? translateEnglishText(String(value ?? "")) : String(value ?? "");
+}
+
+function uiConfirm(message) {
+  return window.confirm(uiText(message));
+}
+
+function uiPrompt(message, defaultValue = "") {
+  return window.prompt(uiText(message), defaultValue);
+}
+
+function translateNodeToEnglish(root) {
+  if (root.nodeType === Node.TEXT_NODE) {
+    const translated = translateEnglishText(root.nodeValue || "");
+    if (translated !== root.nodeValue) root.nodeValue = translated;
+    return;
+  }
+  if (!(root instanceof Element) && root !== document) return;
+  if (root instanceof Element) {
+    for (const attribute of ["aria-label", "title", "placeholder"]) {
+      const value = root.getAttribute(attribute);
+      const translated = value ? translateEnglishText(value) : value;
+      if (translated && translated !== value) root.setAttribute(attribute, translated);
+    }
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const translated = translateEnglishText(walker.currentNode.nodeValue || "");
+    if (translated !== walker.currentNode.nodeValue) walker.currentNode.nodeValue = translated;
+  }
+  if (root.querySelectorAll) {
+    root.querySelectorAll("[aria-label],[title],[placeholder]").forEach((element) => {
+      for (const attribute of ["aria-label", "title", "placeholder"]) {
+        const value = element.getAttribute(attribute);
+        const translated = value ? translateEnglishText(value) : value;
+        if (translated && translated !== value) element.setAttribute(attribute, translated);
+      }
+    });
+  }
+}
+
+function setupLanguage() {
+  const select = $("uiLanguage");
+  if (!select) return;
+  select.value = UI_LANGUAGE;
+  select.addEventListener("change", () => {
+    localStorage.setItem(UI_LANGUAGE_KEY, select.value);
+    location.reload();
+  });
+  document.documentElement.lang = UI_LANGUAGE;
+  if (UI_LANGUAGE !== "en") return;
+  translateNodeToEnglish(document);
+  new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.type === "characterData") translateNodeToEnglish(mutation.target);
+      if (mutation.type === "attributes") translateNodeToEnglish(mutation.target);
+      mutation.addedNodes.forEach(translateNodeToEnglish);
+    }
+  }).observe(document.body, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["aria-label", "title", "placeholder"],
+  });
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -94,7 +431,7 @@ async function apiText(path) {
 
 function toast(message) {
   const box = $("toast");
-  box.textContent = message;
+  box.textContent = uiText(message);
   box.style.display = "block";
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => {
@@ -136,6 +473,10 @@ function downloadTextFile(text, filename, mimeType) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
 }
 
 function escapeHtml(value) {
@@ -213,8 +554,128 @@ function cardActionDeckId() {
   return state.activePage === "deckBuilderPage" ? selectedDeckId() : collectionTargetDeckId();
 }
 
+function aiContext() {
+  const deckId = state.activePage === "deckBuilderPage" ? selectedDeckId() : collectionTargetDeckId();
+  const deck = state.decks.find((item) => Number(item.id) === Number(deckId));
+  const pageNames = {
+    collectionPage: "Sammlung", decksPage: "Decks", deckBuilderPage: "Deck",
+    statsPage: "Statistiken", planningPage: "Planung", historyPage: "Verlauf",
+  };
+  return {
+    page: state.activePage.replace(/Page$/, ""),
+    deck_id: deckId,
+    deck_name: deck?.name || null,
+    collection_search: state.activePage === "collectionPage" ? ($("collectionSearch")?.value || null) : null,
+    label: deck?.name && state.activePage === "deckBuilderPage" ? `Deck: ${deck.name}` : (pageNames[state.activePage] || "ManaVault"),
+  };
+}
+
+function aiStorage() {
+  try { return JSON.parse(sessionStorage.getItem("manavault-ai-chats-v1") || "{}"); } catch { return {}; }
+}
+
+function saveAiHistory() {
+  const chats = aiStorage();
+  chats[state.aiContextKey] = state.aiHistory.slice(-20);
+  sessionStorage.setItem("manavault-ai-chats-v1", JSON.stringify(chats));
+}
+
+function updateAiChatContext() {
+  const context = aiContext();
+  const key = `${context.page}:${context.deck_id || "none"}`;
+  if (key !== state.aiContextKey) {
+    state.aiContextKey = key;
+    state.aiHistory = aiStorage()[key] || [];
+    renderAiMessages();
+  }
+  if ($("aiChatContext")) $("aiChatContext").textContent = uiText(context.label);
+}
+
+function renderAiMessages() {
+  const box = $("aiChatMessages");
+  if (!box) return;
+  box.replaceChildren();
+  for (const message of state.aiHistory) {
+    const bubble = document.createElement("div");
+    bubble.className = `ai-chat-message ${message.role}`;
+    bubble.textContent = message.content;
+    box.appendChild(bubble);
+  }
+  if (!state.aiHistory.length) {
+    const intro = document.createElement("div");
+    intro.className = "ai-chat-empty";
+    intro.textContent = uiText("Frag mich nach Karten in deiner Sammlung, fehlenden Setkarten oder dem aktuell geöffneten Deck.");
+    box.appendChild(intro);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+async function loadAiStatus() {
+  try {
+    const result = await api("/api/ai/status");
+    state.aiConfigured = Boolean(result.configured);
+    $("aiChatStatus").textContent = uiText(state.aiConfigured ? "Der Assistent ist bereit." : "Der optionale Assistent ist nicht eingerichtet.");
+    $("aiChatInput").disabled = !state.aiConfigured;
+    $("aiChatSend").disabled = !state.aiConfigured;
+  } catch (error) {
+    $("aiChatStatus").textContent = error.message;
+  }
+}
+
+function openAiChat() {
+  updateAiChatContext();
+  $("aiChatPanel").hidden = false;
+  $("aiChatToggle").hidden = true;
+  if (state.aiConfigured) $("aiChatInput").focus();
+}
+
+function closeAiChat() {
+  $("aiChatPanel").hidden = true;
+  $("aiChatToggle").hidden = false;
+}
+
+function newAiChat() {
+  state.aiHistory = [];
+  saveAiHistory();
+  renderAiMessages();
+}
+
+async function sendAiMessage(message) {
+  message = message.trim();
+  if (!message || state.aiBusy || !state.aiConfigured) return;
+  updateAiChatContext();
+  const previous = state.aiHistory.slice(-12);
+  state.aiHistory.push({ role: "user", content: message });
+  state.aiBusy = true;
+  $("aiChatInput").value = "";
+  $("aiChatSend").disabled = true;
+  renderAiMessages();
+  $("aiChatStatus").textContent = uiText("Schreibt …");
+  const context = aiContext();
+  delete context.label;
+  try {
+    const result = await api("/api/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({ message, history: previous, context, language: UI_LANGUAGE }),
+    });
+    state.aiHistory.push({ role: "assistant", content: result.answer });
+    saveAiHistory();
+    $("aiChatStatus").textContent = uiText("Der Assistent ist bereit.");
+  } catch (error) {
+    state.aiHistory.push({ role: "assistant", content: error.message });
+    $("aiChatStatus").textContent = error.message;
+  } finally {
+    state.aiBusy = false;
+    $("aiChatSend").disabled = !state.aiConfigured;
+    renderAiMessages();
+  }
+}
+
 async function init() {
+  setupLanguage();
   wireEvents();
+  updateAiChatContext();
+  loadAiStatus();
   loadAppVersion();
   const sharedDeck = deckReferenceFromPublicPath();
   if (sharedDeck) {
@@ -239,6 +700,25 @@ async function loadAppVersion() {
 
 function wireEvents() {
   setupStaticIconButtons();
+  $("deckContentsSearch").addEventListener("input", applyDeckContentsFilters);
+  $("deckContentsZone").addEventListener("change", applyDeckContentsFilters);
+  $("deckContentsType").addEventListener("change", applyDeckContentsFilters);
+  $("deckContentsSort").addEventListener("change", applyDeckContentsFilters);
+  $("clearDeckContentsFilters").addEventListener("click", clearDeckContentsFilters);
+  $("aiChatToggle").addEventListener("click", openAiChat);
+  $("aiChatClose").addEventListener("click", closeAiChat);
+  $("aiChatNew").addEventListener("click", newAiChat);
+  $("aiChatForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendAiMessage($("aiChatInput").value);
+  });
+  $("aiChatInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendAiMessage(event.currentTarget.value);
+    }
+  });
+  document.querySelectorAll("[data-ai-question]").forEach((button) => button.addEventListener("click", () => sendAiMessage(uiText(button.dataset.aiQuestion))));
   document.querySelectorAll(".tab").forEach((button) => {
     button.addEventListener("click", () => showPage(button.dataset.page));
   });
@@ -367,11 +847,13 @@ function wireEvents() {
       await api(`/api/decks/${state.selectedDeckId}/edit/begin`, { method: "POST" });
     }
     await loadDeck();
+    updateAiChatContext();
   });
   $("collectionActiveDeck").addEventListener("change", async () => {
     state.collectionActiveDeckId = selectedDeckIdFromElement("collectionActiveDeck");
     renderDeckSelect();
     renderCollection();
+    updateAiChatContext();
   });
 
   $("deckForm").addEventListener("submit", createDeckFromForm);
@@ -472,14 +954,29 @@ function setIconButton(id, icon, label) {
 function setupStaticIconButtons() {
   setIconButton("importScryfall", "databaseImport", "Scryfall Import");
   setIconButton("exportCollection", "download", "Sammlung exportieren");
-  setIconButton("openDeckBuilder", "deck", "Deckbuilder oeffnen");
+  setIconButton("openDeckBuilder", "deck", "Deckbuilder öffnen");
   setIconButton("deckQrButton", "qr", "QR-Code erstellen");
   $("deckQrButton")?.insertAdjacentHTML("beforeend", "<span>QR-Code</span>");
-  setIconButton("backToDecks", "back", "Zurueck zu Decks");
+  setIconButton("backToDecks", "back", "Zurück zu Decks");
   setIconButton("downloadUserBackup", "download", "Datenbackup exportieren");
   setIconButton("importUserBackup", "upload", "Datenbackup importieren");
   setIconButton("downloadBackup", "download", "Vollbackup exportieren");
   setIconButton("importBackup", "upload", "Vollbackup importieren");
+  setIconButton("createDeck", "plus", "Deck erstellen");
+  setIconButton("clearDeckContentsFilters", "clearFilters", "Deckfilter leeren");
+  document.querySelectorAll(".filter-reset").forEach((button) => {
+    button.innerHTML = iconSvg("clearFilters");
+  });
+  document.querySelectorAll(".filter-toggle-icon").forEach((icon) => {
+    icon.innerHTML = iconSvg("filters");
+  });
+  document.querySelectorAll(".icon-close").forEach((button) => {
+    button.innerHTML = iconSvg("close");
+  });
+  const scannerZoomIn = $("scannerZoomIn");
+  if (scannerZoomIn) scannerZoomIn.innerHTML = iconSvg("zoomIn");
+  const scannerZoomOut = $("scannerZoomOut");
+  if (scannerZoomOut) scannerZoomOut.innerHTML = iconSvg("zoomOut");
   document.querySelectorAll(".scope-toggle-icon").forEach((icon) => {
     icon.innerHTML = iconSvg("allCards");
   });
@@ -516,7 +1013,7 @@ async function startLiveScanner() {
   $("scannerChoice").hidden = true;
   $("scannerResults").innerHTML = "";
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    $("scannerStatus").textContent = "Live-Kamera benoetigt die Tailscale-HTTPS-Adresse. Foto oder Namenssuche sind weiterhin moeglich.";
+    $("scannerStatus").textContent = "Live-Kamera benötigt die Tailscale-HTTPS-Adresse. Foto oder Namenssuche sind weiterhin möglich.";
     $("startLiveScanner").hidden = false;
     return;
   }
@@ -553,7 +1050,7 @@ async function startLiveScanner() {
     resumeLiveScanner();
   } catch (error) {
     $("scannerStatus").textContent = error.name === "NotAllowedError"
-      ? "Kamerazugriff wurde nicht erlaubt. Bitte Browser-Berechtigung pruefen."
+      ? "Kamerazugriff wurde nicht erlaubt. Bitte Browser-Berechtigung prüfen."
       : `Live-Kamera konnte nicht gestartet werden: ${error.message}`;
     $("startLiveScanner").hidden = false;
   }
@@ -944,7 +1441,7 @@ function rememberScannerReport(imageData, result) {
 async function reportScannerIssue(event) {
   const report = state.scannerLastReport;
   if (!report) return;
-  const expected = window.prompt("Welche Karte oder Druckkennung waere richtig? (optional)", "");
+  const expected = uiPrompt("Welche Karte oder Druckkennung wäre richtig? (optional)", "");
   if (expected === null) return;
   await withActionButton(event, async () => {
     const saved = await api("/api/cards/scan-reports", {
@@ -984,7 +1481,7 @@ function handleScannerRecognition(result, immediate = false, fingerprint = null,
       if (selectedPrint && possiblePrints.has(selectedPrint)) return;
       state.scannerCard = null;
       $("scannerChoice").hidden = true;
-      $("scannerStatus").textContent = "Mehrere passende Drucke gefunden - bitte auswaehlen.";
+      $("scannerStatus").textContent = "Mehrere passende Drucke gefunden - bitte auswählen.";
       renderScannerResults(cards);
       return;
     }
@@ -1013,7 +1510,7 @@ function handleScannerRecognition(result, immediate = false, fingerprint = null,
     pauseLiveScanner();
     $("scannerSearch").value = displayName(cards[0]);
     $("scannerStatus").textContent = possiblePrints.size > 1
-      ? "Kennung ist zwischen mehreren echten Set-Codes mehrdeutig. Bitte Druck auswaehlen."
+      ? "Kennung ist zwischen mehreren echten Set-Codes mehrdeutig. Bitte Druck auswählen."
       : `${displayName(cards[0])} - ${scannerPrintLabel(cards[0])} eindeutig erkannt.`;
     renderScannerResults(cards);
   }
@@ -1087,12 +1584,12 @@ function selectScannedCard(index) {
       <div><strong>${escapeHtml(displayName(card))}</strong><small>${escapeHtml(scannerPrintLabel(card))}</small></div>
     </div>
     <div class="quantity-stepper">
-      <button class="secondary" type="button" onclick="changeScannerQuantity(-1)" aria-label="Menge verringern">&minus;</button>
+      <button class="secondary quantity-icon" type="button" onclick="changeScannerQuantity(-1)" aria-label="Menge verringern">${iconSvg("minus")}</button>
       <output id="scannerQuantity">1</output>
-      <button class="secondary" type="button" onclick="changeScannerQuantity(1)" aria-label="Menge erhoehen">+</button>
+      <button class="secondary quantity-icon" type="button" onclick="changeScannerQuantity(1)" aria-label="Menge erhöhen">${iconSvg("plus")}</button>
     </div>
-    <button type="button" onclick="confirmScannedCard(event)">Zur Sammlung hinzufuegen</button>
-    <button class="secondary" type="button" onclick="scannerChooseAgain()">Anderen Druck waehlen</button>`;
+    <button type="button" onclick="confirmScannedCard(event)">Zur Sammlung hinzufügen</button>
+    <button class="secondary" type="button" onclick="scannerChooseAgain()">Anderen Druck wählen</button>`;
 }
 
 function safeScannerScroll(elementId) {
@@ -1132,7 +1629,7 @@ async function confirmScannedCard(event) {
         location_id: defaultCollectionLocationId(),
       }),
     });
-    toast(`${quantity}x ${displayName(selectedCard)} hinzugefuegt.`);
+    toast(`${quantity}x ${displayName(selectedCard)} hinzugefügt.`);
     state.scannerCard = null;
     $("scannerChoice").hidden = true;
     $("scannerResults").innerHTML = "";
@@ -1181,6 +1678,7 @@ function showPage(pageId) {
   }
   if (pageId === "planningPage") loadPlanning();
   if (pageId === "historyPage") loadHistory();
+  updateAiChatContext();
 }
 
 function deckReferenceFromPublicPath() {
@@ -1311,7 +1809,7 @@ function publicDeckCard(slot) {
 
 async function openDeckQr(deckId) {
   if (!deckId) {
-    toast("Bitte zuerst ein Deck auswaehlen.");
+    toast("Bitte zuerst ein Deck auswählen.");
     return;
   }
   let deck = state.decks.find((item) => Number(item.id) === Number(deckId));
@@ -1323,12 +1821,12 @@ async function openDeckQr(deckId) {
   try {
     share = await api(`/api/decks/${deckId}/share`, { method: "POST" });
   } catch (error) {
-    toast(error.message || "Oeffentliche Adresse noch nicht eingerichtet.");
+    toast(error.message || "Öffentliche Adresse noch nicht eingerichtet.");
     return;
   }
   const publicUrl = share.url;
   const qrEndpoint = `/api/decks/${deckId}/qr`;
-  $("deckQrTitle").textContent = `QR-Code fuer ${deck.name}`;
+  $("deckQrTitle").textContent = `QR-Code für ${deck.name}`;
   $("deckQrLabelName").textContent = deck.name;
   $("deckQrUrl").textContent = publicUrl;
   $("deckQrImage").src = qrEndpoint;
@@ -1339,10 +1837,10 @@ async function openDeckQr(deckId) {
 
 async function rotateDeckShare() {
   const deckId = Number($("deckQrDialog").dataset.deckId || 0);
-  if (!deckId || !window.confirm("Der bisherige QR-Code funktioniert danach nicht mehr. Neuen Link erzeugen?")) return;
+  if (!deckId || !uiConfirm("Der bisherige QR-Code funktioniert danach nicht mehr. Neuen Link erzeugen?")) return;
   try {
     const share = await api(`/api/decks/${deckId}/share/rotate`, { method: "POST" });
-    if (!share.url) throw new Error("Oeffentliche Adresse noch nicht eingerichtet.");
+    if (!share.url) throw new Error("Öffentliche Adresse noch nicht eingerichtet.");
     const qrEndpoint = `/api/decks/${deckId}/qr?t=${Date.now()}`;
     $("deckQrUrl").textContent = share.url;
     $("deckQrImage").src = qrEndpoint;
@@ -1355,7 +1853,7 @@ async function rotateDeckShare() {
 
 async function revokeDeckShare() {
   const deckId = Number($("deckQrDialog").dataset.deckId || 0);
-  if (!deckId || !window.confirm("Diesen Freigabelink deaktivieren?")) return;
+  if (!deckId || !uiConfirm("Diesen Freigabelink deaktivieren?")) return;
   try {
     await api(`/api/decks/${deckId}/share`, { method: "DELETE" });
     closeDeckQr();
@@ -1377,12 +1875,12 @@ function printDeckQr() {
 }
 
 const historyLabels = {
-  added: "Hinzugefuegt",
+  added: "Hinzugefügt",
   deck_added: "Ins Deck gelegt",
   deck_removed: "Aus Deck genommen",
   deck_moved: "Deck gewechselt",
   moved: "Verschoben",
-  deleted: "Geloescht",
+  deleted: "Gelöscht",
 };
 
 async function loadHistory() {
@@ -1395,7 +1893,7 @@ async function loadHistory() {
   const groups = groupHistoryItems(items);
   $("historyMeta").textContent = groups.length === items.length
     ? countLabel(items.length, "Ereignis", "Ereignisse")
-    : countLabel(groups.length, "Eintrag", "Eintraege");
+    : countLabel(groups.length, "Eintrag", "Einträge");
   $("historyList").innerHTML = groups.map((item) => {
     const route = item.from_name && item.to_name
       ? `${escapeHtml(item.from_name)} → ${escapeHtml(item.to_name)}`
@@ -1410,7 +1908,7 @@ async function loadHistory() {
         </div>
         <span class="history-route">${route}</span>
       </article>`;
-  }).join("") || emptyState("Noch keine Aenderungen aufgezeichnet.");
+  }).join("") || emptyState("Noch keine Änderungen aufgezeichnet.");
 }
 
 function groupHistoryItems(items) {
@@ -1594,7 +2092,7 @@ function renderCollection() {
     count: card.total_count,
     subCount: cardPrintSummary(card),
     source: allCardsMode ? "global" : "collection",
-  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall pruefen." : "Sammlung leer.");
+  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall prüfen." : "Sammlung leer.");
   $("collectionMeta").textContent = countLabel(state.collection.length, "Karte", "Karten");
   $("collectionLoadMore").style.display = state.collectionHasMore ? "block" : "none";
 }
@@ -1638,13 +2136,34 @@ function renderDeckBuilderCollection() {
     subCount: cardPrintSummary(card),
     source: allCardsMode ? "global" : "collection",
     deckBuilder: true,
-  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall pruefen." : "Keine Karten.");
+  })).join("") || emptyState(allCardsMode ? "Keine Karten. Scryfall prüfen." : "Keine Karten.");
   $("deckBuilderLoadMore").style.display = allCardsMode && state.deckBuilderHasMore ? "block" : "none";
 }
 
 async function loadCollectionStats() {
   state.collectionStats = await api("/api/collection/stats");
   renderCollectionStats();
+}
+
+async function exportMissingSetCards(setCode, event) {
+  await withActionButton(event, async () => {
+    const result = await api(`/api/collection/stats/sets/${encodeURIComponent(setCode)}/missing`);
+    const rows = [
+      ["Set", "Set-Code", "Sammlernummer", "Kartenname", "Seltenheit", "Kartentyp"],
+      ...(result.cards || []).map((card) => [
+        result.set?.name || setCode.toUpperCase(),
+        String(result.set?.code || setCode).toUpperCase(),
+        card.collector_number || "",
+        card.printed_name || card.name || "",
+        card.rarity || "",
+        card.type_line || "",
+      ]),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(";")).join("\r\n")}`;
+    const safeCode = String(setCode || "set").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+    downloadTextFile(csv, `${safeCode}-fehlende-karten.csv`, "text/csv;charset=utf-8");
+    toast(`${result.cards?.length || 0} fehlende Karten exportiert.`);
+  }).catch((error) => toast(error.message));
 }
 
 function statCard(label, value, note = "") {
@@ -1675,7 +2194,7 @@ function renderCollectionStats() {
   const stats = state.collectionStats;
   if (!stats) return;
   const colors = [
-    ["W", "Weiss"], ["U", "Blau"], ["B", "Schwarz"], ["R", "Rot"], ["G", "Gruen"], ["C", "Farblos"],
+    ["W", "Weiß"], ["U", "Blau"], ["B", "Schwarz"], ["R", "Rot"], ["G", "Grün"], ["C", "Farblos"],
   ].map(([color, label]) => ({
     label,
     value: stats.color_counts[color] || 0,
@@ -1697,7 +2216,7 @@ function renderCollectionStats() {
       ${statCard("Originale", stats.original_copies)}
       ${statCard("Proxies", stats.proxy_copies)}
       ${statCard("Sammlungswert", formatEuro(stats.total_value_eur), `${stats.priced_originals} Originale mit Preis`)}
-      ${statCard("Preis-Fallback", stats.fallback_priced_originals, "ueber englische Preise")}
+      ${statCard("Preis-Fallback", stats.fallback_priced_originals, "über englische Preise")}
     </div>
     <div class="stats-columns">
       <section class="stats-panel">
@@ -1714,7 +2233,7 @@ function renderCollectionStats() {
       </section>
     </div>
     <section class="stats-panel">
-      <h3>Hoechster Sammlungswert</h3>
+      <h3>Höchster Sammlungswert</h3>
       <div class="stat-top-list">
         ${(stats.top_value_cards || []).map((card) => `
           <div class="stat-top-row">
@@ -1741,6 +2260,7 @@ function renderCollectionStats() {
               <span>${set.owned_copies || 0} Originale</span>
               ${set.proxy_copies ? `<span>${set.proxy_copies} Proxies</span>` : ""}
               <span class="missing-value">${set.missing_prints || 0} fehlen</span>
+              ${set.missing_prints ? `<button class="set-missing-export" type="button" onclick="exportMissingSetCards('${escapeHtml(set.code)}', event)">${iconSvg("download")}<span>Fehlende CSV</span></button>` : ""}
             </div>
             ${(set.missing_examples || []).length ? `
               <details class="set-missing">
@@ -1845,7 +2365,7 @@ function cardTile(card, options) {
     ? `onmouseenter="showCardPreview(event, '${escapeHtml(card.image_url)}')" onmousemove="moveCardPreview(event)" onmouseleave="hideCardPreview()"`
     : "";
   const deckBuilderAction = options.deckBuilder
-    ? `<button class="tile-action secondary" title="Original hinzufuegen und ins Deck" aria-label="Original hinzufuegen und ins Deck" onclick="addOriginalToDeck(${card.id}, event)">${iconSvg("originalDeck")}</button>`
+    ? `<button class="tile-action secondary" title="Original hinzufügen und ins Deck" aria-label="Original hinzufügen und ins Deck" onclick="addOriginalToDeck(${card.id}, event)">${iconSvg("originalDeck")}</button>`
     : "";
   const addToDeckAction = options.deckBuilder || collectionTargetDeckId()
     ? `<button class="tile-action primary" title="Ins Deck" aria-label="Ins Deck" onclick="addToDeckFlow(${card.id}, event)">${iconSvg("deck")}</button>`
@@ -1872,8 +2392,8 @@ function cardTile(card, options) {
       <div class="tile-actions">
         ${addToDeckAction}
         ${deckBuilderAction}
-        <button class="tile-action secondary" title="Original hinzufuegen" aria-label="Original hinzufuegen" onclick="quickAddCopy(${card.id}, false, event)">${iconSvg("original")}</button>
-        <button class="tile-action secondary" title="Proxy hinzufuegen" aria-label="Proxy hinzufuegen" onclick="quickAddCopy(${card.id}, true, event)">${iconSvg("proxy")}</button>
+        <button class="tile-action secondary" title="Original hinzufügen" aria-label="Original hinzufügen" onclick="quickAddCopy(${card.id}, false, event)">${iconSvg("original")}</button>
+        <button class="tile-action secondary" title="Proxy hinzufügen" aria-label="Proxy hinzufügen" onclick="quickAddCopy(${card.id}, true, event)">${iconSvg("proxy")}</button>
       </div>
     </article>
   `;
@@ -1881,30 +2401,39 @@ function cardTile(card, options) {
 
 function iconSvg(name) {
   const icons = {
-    deck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="11" height="15" rx="2"></rect><path d="M9 2h8a2 2 0 0 1 2 2v12"></path><path d="M9 8h5"></path><path d="M9 12h5"></path></svg>`,
-    original: `<span class="action-symbol">O</span><span class="action-plus">+</span>`,
-    originalDeck: `<span class="action-symbol">O</span><svg class="action-mini-deck" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="4" width="11" height="15" rx="2"></rect><path d="M9 8h5"></path><path d="M9 12h5"></path></svg>`,
-    proxy: `<span class="action-symbol proxy-symbol">P</span><span class="action-plus">+</span>`,
-    proxyBadge: `<span class="metric-letter proxy-symbol">P</span>`,
-    open: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>`,
+    deck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="13" height="15" rx="2.5"></rect><path d="M8 3h9.5A2.5 2.5 0 0 1 20 5.5V17M9 11h5M9 15h5"></path></svg>`,
+    original: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="12" height="16" rx="2.5"></rect><path d="M19 8v6M16 11h6"></path></svg>`,
+    originalDeck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="10" height="14" rx="2"></rect><path d="M6 3h8a2 2 0 0 1 2 2v4M15 15h6M18 12v6"></path></svg>`,
+    proxy: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect class="proxy-card" x="3.5" y="4" width="12" height="16" rx="2.5"></rect><path d="M19 8v6M16 11h6"></path></svg>`,
+    proxyBadge: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect class="proxy-card" x="5" y="3" width="14" height="18" rx="3"></rect><path d="M9 8h6M9 12h4"></path></svg>`,
+    open: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 8V6A2 2 0 0 1 5.5 4H10l2 2h5.5A2.5 2.5 0 0 1 20 8.5M3.5 8v11a2 2 0 0 0 2 2h12a2.5 2.5 0 0 0 2.4-1.8l1.6-6A2.5 2.5 0 0 0 19.1 10H8a2.5 2.5 0 0 0-2.4 1.8L3.5 19"></path></svg>`,
     qr: `<svg class="qr-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3V3Zm2 2v4h4V5H5Zm8-2h8v8h-8V3Zm2 2v4h4V5h-4ZM3 13h8v8H3v-8Zm2 2v4h4v-4H5Zm8-2h3v3h-3v-3Zm5 0h3v5h-2v3h-3v-5h2v-3Zm-5 5h3v3h-3v-3Zm6 1h2v2h-2v-2Z"></path></svg>`,
-    edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>`,
-    delete: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 13h10l1-13"></path><path d="M9 7V4h6v3"></path></svg>`,
+    edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4M4 20l1-4 10.8-10.8a2.8 2.8 0 0 1 4 4L9 20H4Z"></path></svg>`,
+    delete: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"></path></svg>`,
     cover: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2l-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"></path></svg>`,
     coverFilled: `<svg class="filled-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2l-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"></path></svg>`,
     download: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 20h14"></path></svg>`,
     upload: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21V9"></path><path d="m7 14 5-5 5 5"></path><path d="M5 4h14"></path></svg>`,
-    databaseImport: `<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="7" ry="3"></ellipse><path d="M5 5v8c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path><path d="M5 9c0 1.7 3.1 3 7 3s7-1.3 7-3"></path><path d="M12 22v-6"></path><path d="m8 18 4 4 4-4"></path></svg>`,
-    back: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"></path><path d="m12 5-7 7 7 7"></path></svg>`,
+    databaseImport: `<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="10" cy="5" rx="6.5" ry="2.5"></ellipse><path d="M3.5 5v8c0 1.4 2.9 2.5 6.5 2.5 1 0 2-.1 2.8-.3M3.5 9c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5M18 13v8M14.5 17.5 18 21l3.5-3.5"></path></svg>`,
+    back: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12H4M10 6l-6 6 6 6"></path></svg>`,
     cart: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="20" r="1.5"></circle><circle cx="18" cy="20" r="1.5"></circle><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.8a2 2 0 0 0 2-1.6L21 8H7"></path></svg>`,
     refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M19.2 11A7.5 7.5 0 1 0 17 17.3"></path></svg>`,
-    allCards: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>`,
-    check: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"></path></svg>`,
+    allCards: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"></rect><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"></rect><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"></rect><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"></rect></svg>`,
+    check: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m8 12 2.6 2.6L16.5 9"></path></svg>`,
     minus: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"></path></svg>`,
-    moveToSideboard: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="9" height="13" rx="2"></rect><path d="M15 8h6v11h-6"></path><path d="m11 12 4 0"></path><path d="m13 10 2 2-2 2"></path></svg>`,
-    moveToDeck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="12" y="5" width="9" height="13" rx="2"></rect><path d="M9 8H3v11h6"></path><path d="m13 12-4 0"></path><path d="m11 10-2 2 2 2"></path></svg>`,
+    moveToSideboard: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="10" height="16" rx="2"></rect><path d="M7 8h3M7 11h3M14 12h7M18 9l3 3-3 3"></path></svg>`,
+    moveToDeck: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="11" y="4" width="10" height="16" rx="2"></rect><path d="M14 8h3M14 11h3M10 12H3M6 9l-3 3 3 3"></path></svg>`,
     box: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8 12 4l8 4-8 4-8-4Z"></path><path d="M4 8v8l8 4 8-4V8"></path><path d="M12 12v8"></path></svg>`,
-    missing: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v6"></path><path d="M12 17h.01"></path></svg>`,
+    missing: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.5h.01"></path></svg>`,
+    plus: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>`,
+    close: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>`,
+    filters: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"></path><circle cx="16" cy="6" r="2"></circle><circle cx="8" cy="12" r="2"></circle><circle cx="13" cy="18" r="2"></circle></svg>`,
+    clearFilters: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8L3 5Z"></path><path d="m17 16 4 4M21 16l-4 4"></path></svg>`,
+    zoomIn: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 5 5M10.5 7.5v6M7.5 10.5h6"></path></svg>`,
+    zoomOut: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 5 5M7.5 10.5h6"></path></svg>`,
+    abilityCounter: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 14.4 9l5.6.5-4.2 3.7 1.2 5.5-5-2.9-5 2.9 1.2-5.5L4 9.5 9.6 9 12 3.5Z"></path></svg>`,
+    counter: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 8v8M8 12h8"></path></svg>`,
+    gameAid: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H17a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H7a3 3 0 0 1-3-3V7.5Z"></path><path d="M8 11h4M10 9v4M16.5 10.5h.01M17.5 14h.01"></path></svg>`,
   };
   return icons[name] || "";
 }
@@ -1912,7 +2441,7 @@ function iconSvg(name) {
 function valueBadge(card, source) {
   const price = Number(card.price_eur || 0);
   const total = Number(card.collection_value_eur || 0);
-  const priceSource = card.price_source && card.price_source !== "own" ? " ueber englischen Preis" : "";
+  const priceSource = card.price_source && card.price_source !== "own" ? " über englischen Preis" : "";
   if (source === "collection" && total > 0) {
     return `<span class="value-badge" title="Sammlungswert Originale${priceSource}">${formatEuro(total)}</span>`;
   }
@@ -1925,7 +2454,7 @@ function valueBadge(card, source) {
 function priceDetailBlock(card) {
   const price = Number(card.price_eur || 0);
   const total = Number(card.collection_value_eur || 0);
-  const source = card.price_source && card.price_source !== "own" ? "ueber englischen Preis" : "eigener Preis";
+  const source = card.price_source && card.price_source !== "own" ? "über englischen Preis" : "eigener Preis";
   if (price <= 0 && total <= 0) return "";
   return `
     <div class="price-detail">
@@ -2035,8 +2564,8 @@ async function openCardDetail(cardId) {
         ${renderTagEditor(card.id, detail.tags)}
         <div class="button-row">
           <button type="button" onclick="addToDeckFlow(${card.id})">Ins Deck</button>
-          <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, false)">Original hinzufuegen</button>
-          <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, true)">Proxy hinzufuegen</button>
+          <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, false)">Original hinzufügen</button>
+          <button type="button" class="secondary" onclick="quickAddCopy(${card.id}, true)">Proxy hinzufügen</button>
         </div>
         <h3>Status</h3>
         ${detail.places.map((place) => `
@@ -2101,7 +2630,7 @@ function copyEditor(copy) {
   const isInDeck = Boolean(copy.assigned_deck_id);
   const deckSelect = `
     <select onchange="patchCopy(${copy.id}, { assigned_deck_id: Number(this.value) || null })">
-      <option value="">Deck waehlen...</option>
+      <option value="">Deck wählen...</option>
       ${state.decks.map((deck) => `<option value="${deck.id}" ${deck.id === copy.assigned_deck_id ? "selected" : ""}>${escapeHtml(deck.name)}</option>`).join("")}
     </select>
   `;
@@ -2112,7 +2641,7 @@ function copyEditor(copy) {
       <strong>${isInDeck ? "Deck" : "Sammlung"}</strong>
       ${isInDeck ? deckSelect : `<span class="muted">In deiner Sammlung</span>`}
       ${isInDeck ? `<button class="secondary" type="button" onclick="moveCopyToCollection(${copy.id}, ${copy.card_id})">Zur Sammlung</button>` : deckSelect}
-      <button class="secondary" type="button" onclick="deleteCopy(${copy.id}, ${copy.card_id})">Loeschen</button>
+      <button class="secondary" type="button" onclick="deleteCopy(${copy.id}, ${copy.card_id})">Löschen</button>
     </div>
   `;
 }
@@ -2125,7 +2654,7 @@ async function quickAddCopy(cardId, isProxy, event = null) {
       body: JSON.stringify({ card_id: cardId, is_proxy: isProxy, location_id: locationId }),
     });
     recordQuickAddBurst(cardId, isProxy);
-    toast(isProxy ? "Proxy hinzugefuegt." : "Original hinzugefuegt.");
+    toast(isProxy ? "Proxy hinzugefügt." : "Original hinzugefügt.");
     if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
     if ($("cardDialog").open) await openCardDetail(cardId);
   });
@@ -2152,7 +2681,7 @@ function recordQuickAddBurst(cardId, isProxy) {
 async function addOriginalToDeck(cardId, event = null) {
   const deckId = selectedDeckId();
   if (!deckId) {
-    toast("Bitte im Deckbuilder ein Deck auswaehlen.");
+    toast("Bitte im Deckbuilder ein Deck auswählen.");
     return;
   }
   await withActionButton(event, async () => {
@@ -2161,7 +2690,7 @@ async function addOriginalToDeck(cardId, event = null) {
       body: JSON.stringify({ card_id: cardId, quantity: 1, action: "create_original" }),
     });
     recordQuickAddBurst(cardId, false);
-    toast(`${result.card_name} als Original hinzugefuegt und ins Deck gelegt.`);
+    toast(`${result.card_name} als Original hinzugefügt und ins Deck gelegt.`);
     if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
     await Promise.all([loadDeck(), loadDecks(), loadPlanning()]);
   }).catch((error) => toast(error.message));
@@ -2182,7 +2711,7 @@ async function patchCopy(id, patch) {
 
 async function deleteCopy(id, cardId) {
   await api(`/api/collection/copies/${id}`, { method: "DELETE" });
-  toast("Copy geloescht.");
+  toast("Copy gelöscht.");
   await loadCollection();
   if (cardId && $("cardDialog").open) await openCardDetail(cardId);
 }
@@ -2190,7 +2719,7 @@ async function deleteCopy(id, cardId) {
 async function addToDeckFlow(cardId, event = null) {
   const deckId = cardActionDeckId();
   if (!deckId) {
-    toast(state.activePage === "deckBuilderPage" ? "Bitte im Deckbuilder ein Deck auswaehlen." : "Bitte oben in der Sammlung ein aktives Deck auswaehlen.");
+    toast(state.activePage === "deckBuilderPage" ? "Bitte im Deckbuilder ein Deck auswählen." : "Bitte oben in der Sammlung ein aktives Deck auswählen.");
     return;
   }
   await withActionButton(event, async () => {
@@ -2206,7 +2735,7 @@ async function addToDeckFlow(cardId, event = null) {
       return;
     }
     recordQuickAddBurst(cardId, false);
-    toast(`${result.card_name} wurde dem Deck hinzugefuegt.`);
+    toast(`${result.card_name} wurde dem Deck hinzugefügt.`);
     if (result.counts) updateGlobalCopyCounts(cardId, result.counts);
     scheduleDeckRefresh();
     schedulePlanningRefresh();
@@ -2226,7 +2755,7 @@ function renderDecision(availability) {
     <p class="muted">Keine freie Original-Copy gefunden. Was soll ManaVault tun?</p>
     <div class="decision-actions">
       ${otherCopies}
-      <button type="button" class="wide" onclick="resolveDecision('proxy')">Proxy fuer dieses Deck erstellen</button>
+      <button type="button" class="wide" onclick="resolveDecision('proxy')">Proxy für dieses Deck erstellen</button>
       <button type="button" class="wide secondary" onclick="resolveDecision('plan')">Auf Einkaufsliste / geplant lassen</button>
     </div>
   `;
@@ -2264,7 +2793,7 @@ function renderDeckList() {
     : `${decks.length}/${state.decks.length} Decks`;
   $("deckList").innerHTML = decks.map((deck) => `
     <article class="deck-overview-card">
-      <button class="deck-cover-button" onclick="selectDeck(${deck.id})" title="Deck oeffnen" aria-label="Deck oeffnen">
+      <button class="deck-cover-button" onclick="selectDeck(${deck.id})" title="Deck öffnen" aria-label="Deck öffnen">
         ${deck.commander_image_url ? `<img src="${escapeHtml(deck.commander_image_url)}" alt="">` : `<span>${escapeHtml(deck.name)}</span>`}
       </button>
       <div class="deck-overview-body">
@@ -2281,11 +2810,11 @@ function renderDeckList() {
         </div>
       </div>
       <div class="deck-overview-actions">
-        <button class="icon-button" title="Oeffnen" aria-label="Oeffnen" onclick="selectDeck(${deck.id})">${iconSvg("open")}</button>
+        <button class="icon-button" title="Öffnen" aria-label="Öffnen" onclick="selectDeck(${deck.id})">${iconSvg("open")}</button>
         <button class="icon-button secondary" title="QR-Code erstellen" aria-label="QR-Code erstellen" onclick="openDeckQr(${deck.id})">${iconSvg("qr")}</button>
         <button class="icon-button secondary" title="Deck exportieren" aria-label="Deck exportieren" onclick="exportDeck(${deck.id})">${iconSvg("download")}</button>
         <button class="icon-button secondary" title="Bearbeiten" aria-label="Bearbeiten" onclick="editDeck(${deck.id})">${iconSvg("edit")}</button>
-        <button class="icon-button secondary danger" title="Loeschen" aria-label="Loeschen" onclick="deleteDeck(${deck.id})">${iconSvg("delete")}</button>
+        <button class="icon-button secondary danger" title="Löschen" aria-label="Löschen" onclick="deleteDeck(${deck.id})">${iconSvg("delete")}</button>
       </div>
     </article>
   `).join("") || emptyState("Noch keine Decks.");
@@ -2381,9 +2910,9 @@ async function openDeckBuilder() {
 async function editDeck(deckId) {
   const deck = state.decks.find((item) => item.id === deckId);
   if (!deck) return;
-  const name = prompt("Deckname:", deck.name);
+  const name = uiPrompt("Deckname:", deck.name);
   if (!name) return;
-  const format = prompt("Format:", deck.format || "Commander") || deck.format;
+  const format = uiPrompt("Format:", deck.format || "Commander") || deck.format;
   await api(`/api/decks/${deckId}`, {
     method: "PATCH",
     body: JSON.stringify({ name, format }),
@@ -2395,7 +2924,7 @@ async function editDeck(deckId) {
 }
 
 async function deleteDeck(deckId) {
-  if (!confirm("Deck wirklich loeschen? Zugewiesene Copies bleiben in der Sammlung.")) return;
+  if (!uiConfirm("Deck wirklich löschen? Zugewiesene Copies bleiben in der Sammlung.")) return;
   await api(`/api/decks/${deckId}`, { method: "DELETE" });
   if (state.selectedDeckId === deckId) state.selectedDeckId = null;
   if (state.collectionActiveDeckId === deckId) state.collectionActiveDeckId = null;
@@ -2407,7 +2936,10 @@ async function deleteDeck(deckId) {
 async function loadDeck() {
   const deckId = selectedDeckId();
   if (!deckId) {
-    $("deckDetail").innerHTML = emptyState("Kein Deck ausgewaehlt.");
+    state.deckDetailData = null;
+    state.deckStatusData = null;
+    $("deckContentsFilters").hidden = true;
+    $("deckDetail").innerHTML = emptyState("Kein Deck ausgewählt.");
     $("deckStatus").innerHTML = "";
     return;
   }
@@ -2419,13 +2951,116 @@ async function loadDeck() {
   state.deckVariants = variants.variants || [];
   state.activeDeckVariantId = variants.active_variant_id;
   state.deckEditDirty = Boolean(variants.dirty);
+  if (Number(state.deckContentsDeckId) !== Number(deckId)) {
+    state.deckContentsDeckId = deckId;
+    state.deckContentsSearch = "";
+    state.deckContentsZone = "all";
+    state.deckContentsType = "";
+    state.deckContentsSort = "name";
+  }
+  state.deckDetailData = detail;
+  state.deckStatusData = status;
   renderDeckVariantBar();
-  const deckCards = detail.slots.filter((slot) => !slot.is_token && slot.zone !== "sideboard");
-  const sideboard = detail.slots.filter((slot) => !slot.is_token && slot.zone === "sideboard");
-  const tokens = detail.slots.filter((slot) => slot.is_token);
-  const cardCount = deckCards.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
-  const sideboardCount = sideboard.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
-  const tokenCount = tokens.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+  syncDeckContentsControls();
+  $("deckContentsFilters").hidden = false;
+  renderDeckContents();
+  renderStatus(status);
+}
+
+function syncDeckContentsControls() {
+  $("deckContentsSearch").value = state.deckContentsSearch;
+  $("deckContentsZone").value = state.deckContentsZone;
+  $("deckContentsType").value = state.deckContentsType;
+  $("deckContentsSort").value = state.deckContentsSort;
+}
+
+function applyDeckContentsFilters() {
+  state.deckContentsSearch = $("deckContentsSearch").value.trim();
+  state.deckContentsZone = $("deckContentsZone").value;
+  state.deckContentsType = $("deckContentsType").value;
+  state.deckContentsSort = $("deckContentsSort").value;
+  renderDeckContents();
+}
+
+function clearDeckContentsFilters() {
+  state.deckContentsSearch = "";
+  state.deckContentsZone = "all";
+  state.deckContentsType = "";
+  state.deckContentsSort = "name";
+  syncDeckContentsControls();
+  renderDeckContents();
+  $("deckContentsSearch").focus();
+}
+
+function deckContentsZone(slot) {
+  if (slot.is_token) return "tokens";
+  return slot.zone === "sideboard" ? "sideboard" : "mainboard";
+}
+
+function sortedDeckContents(slots) {
+  const result = [...slots];
+  const name = (slot) => String(slot.printed_name || slot.name || "");
+  if (state.deckContentsSort === "cmc") {
+    result.sort((a, b) => Number(a.cmc || 0) - Number(b.cmc || 0) || name(a).localeCompare(name(b), UI_LANGUAGE));
+  } else if (state.deckContentsSort === "type") {
+    result.sort((a, b) => String(a.type_line || "").localeCompare(String(b.type_line || ""), UI_LANGUAGE) || name(a).localeCompare(name(b), UI_LANGUAGE));
+  } else {
+    result.sort((a, b) => name(a).localeCompare(name(b), UI_LANGUAGE));
+  }
+  return result;
+}
+
+function renderDeckContents() {
+  const detail = state.deckDetailData;
+  const status = state.deckStatusData;
+  if (!detail || !status) return;
+  const allSlots = detail.slots || [];
+  const query = state.deckContentsSearch.toLocaleLowerCase(UI_LANGUAGE);
+  const visibleSlots = sortedDeckContents(allSlots.filter((slot) => {
+    if (state.deckContentsZone !== "all" && deckContentsZone(slot) !== state.deckContentsZone) return false;
+    if (state.deckContentsType && !String(slot.type_line || "").toLocaleLowerCase(UI_LANGUAGE).includes(state.deckContentsType.toLocaleLowerCase(UI_LANGUAGE))) return false;
+    if (!query) return true;
+    return [slot.name, slot.printed_name, slot.type_line, slot.oracle_text, slot.set_code, slot.collector_number, slot.mana_cost]
+      .some((value) => String(value || "").toLocaleLowerCase(UI_LANGUAGE).includes(query));
+  }));
+  const groups = {
+    mainboard: allSlots.filter((slot) => deckContentsZone(slot) === "mainboard"),
+    sideboard: allSlots.filter((slot) => deckContentsZone(slot) === "sideboard"),
+    tokens: allSlots.filter((slot) => deckContentsZone(slot) === "tokens"),
+  };
+  const visibleGroups = {
+    mainboard: visibleSlots.filter((slot) => deckContentsZone(slot) === "mainboard"),
+    sideboard: visibleSlots.filter((slot) => deckContentsZone(slot) === "sideboard"),
+    tokens: visibleSlots.filter((slot) => deckContentsZone(slot) === "tokens"),
+  };
+  const quantity = (slots) => slots.reduce((sum, slot) => sum + Number(slot.quantity || 0), 0);
+  const activeFilter = Boolean(query || state.deckContentsType || state.deckContentsZone !== "all");
+  $("deckContentsFilterMeta").textContent = uiText(activeFilter
+    ? `${visibleSlots.length} von ${allSlots.length} Kartenpositionen`
+    : `${allSlots.length} Kartenpositionen`);
+  const section = (zone, title, className, emptyMessage) => {
+    if (state.deckContentsZone !== "all" && state.deckContentsZone !== zone) return "";
+    const matches = visibleGroups[zone];
+    if (activeFilter && !matches.length) return "";
+    const visibleQuantity = quantity(matches);
+    const totalQuantity = quantity(groups[zone]);
+    const count = activeFilter ? `${visibleQuantity}/${totalQuantity}` : totalQuantity;
+    return `
+      <section class="deck-slot-section ${className}">
+        <div class="deck-slot-section-head"><h4>${title}</h4><span>${count}</span></div>
+        <div class="deck-card-grid${zone === "tokens" ? " token-card-grid" : ""}">
+          ${matches.map((slot) => deckSlotTile(slot)).join("") || emptyState(emptyMessage)}
+        </div>
+      </section>`;
+  };
+  const sections = [
+    section("mainboard", "Hauptdeck", "", "Noch keine Deckkarten. Klicke links bei Karten auf 'Ins Deck'."),
+    section("sideboard", "Sideboard", "sideboard-slot-section", "Noch keine Sideboard-Karten."),
+    section("tokens", "Tokens", "token-slot-section", "Noch keine Tokens hinzugefügt."),
+  ].join("");
+  const cardCount = quantity(groups.mainboard);
+  const sideboardCount = quantity(groups.sideboard);
+  const tokenCount = quantity(groups.tokens);
   $("deckDetail").innerHTML = `
     <div class="pane-head deck-list-head">
       <div>
@@ -2438,28 +3073,10 @@ async function loadDeck() {
         ${tokenCount ? `<span><strong>${tokenCount}</strong> Tokens</span>` : ""}
       </div>
     </div>
-    <section class="deck-slot-section">
-      <div class="deck-slot-section-head"><h4>Hauptdeck</h4><span>${cardCount}</span></div>
-      <div class="deck-card-grid">
-        ${deckCards.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Deckkarten. Klicke links bei Karten auf 'Ins Deck'.")}
-      </div>
-    </section>
-    <section class="deck-slot-section sideboard-slot-section">
-      <div class="deck-slot-section-head"><h4>Sideboard</h4><span>${sideboardCount}</span></div>
-      <div class="deck-card-grid">
-        ${sideboard.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Sideboard-Karten.")}
-      </div>
-    </section>
-    <section class="deck-slot-section token-slot-section">
-      <div class="deck-slot-section-head"><h4>Tokens</h4><span>${tokenCount}</span></div>
-      <div class="deck-card-grid token-card-grid">
-        ${tokens.map((slot) => deckSlotTile(slot)).join("") || emptyState("Noch keine Tokens hinzugefuegt.")}
-      </div>
-    </section>
+    ${sections || emptyState("Keine Karte im Deck passt zu dieser Suche.")}
     ${requiredTokensBlock(status.required_tokens || [])}
     ${accessoriesBlock(status.accessories || [])}
   `;
-  renderStatus(status);
 }
 
 function deckSlotTile(slot) {
@@ -2474,10 +3091,15 @@ function deckSlotTile(slot) {
       </button>
       <div class="tile-meta-row">
         <span class="count-badge">${slot.quantity}x</span>
-        <button class="icon-button secondary slot-decrement" title="Eine Karte entfernen" aria-label="Eine Karte entfernen" onclick="decrementSlot(${slot.id}, event)">${iconSvg("minus")}</button>
-        ${slot.is_token ? `<span></span>` : `<button class="icon-button secondary slot-zone" title="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" aria-label="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" onclick="moveSlotZone(${slot.id}, '${slot.zone === "sideboard" ? "mainboard" : "sideboard"}')">${iconSvg(slot.zone === "sideboard" ? "moveToDeck" : "moveToSideboard")}</button>`}
-        <button class="icon-button secondary cover-button${slot.is_cover ? " active" : ""}" title="Als Deckblatt setzen" aria-label="Als Deckblatt setzen" onclick="setDeckCover(${slot.card_id})">${iconSvg(slot.is_cover ? "coverFilled" : "cover")}</button>
-        <button class="icon-button secondary danger" title="Aus Deckliste entfernen" aria-label="Aus Deckliste entfernen" onclick="deleteSlot(${slot.id})">${iconSvg("delete")}</button>
+        <div class="slot-quantity-actions">
+          <button class="icon-button secondary slot-decrement" title="Eine Karte entfernen" aria-label="Eine Karte entfernen" onclick="decrementSlot(${slot.id}, event)">${iconSvg("minus")}</button>
+          <button class="icon-button secondary slot-increment" title="Eine Karte hinzufügen" aria-label="Eine Karte hinzufügen" onclick="incrementSlot(${slot.id}, event)">${iconSvg("plus")}</button>
+        </div>
+        <div class="slot-management-actions">
+          ${slot.is_token ? "" : `<button class="icon-button secondary slot-zone" title="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" aria-label="${slot.zone === "sideboard" ? "Ins Hauptdeck" : "Ins Sideboard"}" onclick="moveSlotZone(${slot.id}, '${slot.zone === "sideboard" ? "mainboard" : "sideboard"}')">${iconSvg(slot.zone === "sideboard" ? "moveToDeck" : "moveToSideboard")}</button>`}
+          <button class="icon-button secondary cover-button${slot.is_cover ? " active" : ""}" title="Als Deckblatt setzen" aria-label="Als Deckblatt setzen" onclick="setDeckCover(${slot.card_id})">${iconSvg(slot.is_cover ? "coverFilled" : "cover")}</button>
+          <button class="icon-button secondary danger slot-delete" title="Aus Deckliste entfernen" aria-label="Aus Deckliste entfernen" onclick="deleteSlot(${slot.id})">${iconSvg("delete")}</button>
+        </div>
       </div>
       <div class="tile-body">
         <strong>${escapeHtml(slot.name)}</strong>
@@ -2524,7 +3146,7 @@ async function saveDeckChanges(event) {
 async function discardDeckChanges(event) {
   const deckId = selectedDeckId();
   if (!deckId || !state.deckEditDirty) return;
-  if (!confirm("Alle Änderungen seit dem Öffnen verwerfen?")) return;
+  if (!uiConfirm("Alle Änderungen seit dem Öffnen verwerfen?")) return;
   await withActionButton(event, async () => {
     await api(`/api/decks/${deckId}/edit/discard`, { method: "POST" });
     await continueDeckEditing();
@@ -2537,7 +3159,7 @@ async function saveDeckAsVariant(event) {
   const deckId = selectedDeckId();
   if (!deckId) return;
   const suggested = `Variante ${state.deckVariants.length + 1}`;
-  const name = prompt("Name der neuen Variante:", suggested)?.trim();
+  const name = uiPrompt("Name der neuen Variante:", suggested)?.trim();
   if (!name) return;
   await withActionButton(event, async () => {
     await api(`/api/decks/${deckId}/variants`, {
@@ -2555,7 +3177,7 @@ async function activateSelectedDeckVariant(event) {
   const variantId = Number(event.target.value);
   if (!deckId || !variantId || variantId === Number(state.activeDeckVariantId)) return;
   if (state.deckEditDirty) {
-    const discard = confirm("Es gibt ungespeicherte Änderungen. Verwerfen und die gewählte Variante aktivieren?");
+    const discard = uiConfirm("Es gibt ungespeicherte Änderungen. Verwerfen und die gewählte Variante aktivieren?");
     if (!discard) {
       event.target.value = String(state.activeDeckVariantId || "");
       return;
@@ -2713,9 +3335,9 @@ function requiredTokensBlock(tokens) {
 function accessoriesBlock(items, publicView = false) {
   if (!items.length) return "";
   const categories = [
-    ["ability_counter", "Fähigkeitsmarker", "A"],
-    ["counter", "Weitere Marker", "+"],
-    ["game_aid", "Weitere Spielhilfen", "Z"],
+    ["ability_counter", "Fähigkeitsmarker", "abilityCounter"],
+    ["counter", "Weitere Marker", "counter"],
+    ["game_aid", "Weitere Spielhilfen", "gameAid"],
   ];
   return `
     <section class="accessory-block${publicView ? " public-accessory-block public-deck-section" : ""}">
@@ -2723,7 +3345,7 @@ function accessoriesBlock(items, publicView = false) {
         <div><h3>Zubehör</h3></div>
         <span>${items.length} Hinweise</span>
       </div>
-      ${categories.map(([key, label, symbol]) => {
+      ${categories.map(([key, label, icon]) => {
         const matches = items.filter((item) => item.category === key);
         if (!matches.length) return "";
         return `
@@ -2732,7 +3354,7 @@ function accessoriesBlock(items, publicView = false) {
             <div class="accessory-list">
               ${matches.map((item) => `
                 <article class="accessory-row">
-                  <span class="accessory-symbol accessory-${key}">${symbol}</span>
+                  <span class="accessory-symbol accessory-${key}">${iconSvg(icon)}</span>
                   <div><strong>${escapeHtml(item.name)}</strong><small>Benötigt durch: ${item.source_names.map(escapeHtml).join(", ")}</small></div>
                 </article>`).join("")}
             </div>
@@ -2799,6 +3421,19 @@ async function decrementSlot(slotId, event = null) {
   }).catch((error) => toast(error.message));
 }
 
+async function incrementSlot(slotId, event = null) {
+  const deckId = selectedDeckId();
+  if (!deckId) return;
+  await withActionButton(event, async () => {
+    const result = await api(`/api/decks/${deckId}/slots/${slotId}/increment`, { method: "POST" });
+    if (result.card_id && result.counts) {
+      updateGlobalCopyCounts(result.card_id, result.counts);
+    }
+    toast(`Jetzt ${result.quantity}x im Deck.`);
+    await Promise.all([loadDeck(), loadPlanning()]);
+  }).catch((error) => toast(error.message));
+}
+
 async function exportDeck(deckId = null) {
   deckId = deckId || selectedDeckId();
   if (!deckId) return;
@@ -2834,10 +3469,10 @@ function downloadUserBackup() {
 async function importUserBackup(event) {
   const file = $("userBackupImportFile").files[0];
   if (!file) {
-    toast("Bitte zuerst ein Datenbackup auswaehlen.");
+    toast("Bitte zuerst ein Datenbackup auswählen.");
     return;
   }
-  if (!confirm("Datenbackup wirklich importieren? Sammlung und Decks werden ersetzt. Scryfall kannst du danach neu laden.")) return;
+  if (!uiConfirm("Datenbackup wirklich importieren? Sammlung und Decks werden ersetzt. Scryfall kannst du danach neu laden.")) return;
   await withActionButton(event, async () => {
     const response = await fetch("/api/backups/user-data/import", {
       method: "POST",
@@ -2862,10 +3497,10 @@ async function importUserBackup(event) {
 async function importBackup(event) {
   const file = $("backupImportFile").files[0];
   if (!file) {
-    toast("Bitte zuerst eine Backup-Datei auswaehlen.");
+    toast("Bitte zuerst eine Backup-Datei auswählen.");
     return;
   }
-  if (!confirm("Backup wirklich importieren? Die aktuelle Datenbank wird vorher automatisch gesichert und dann ersetzt.")) return;
+  if (!uiConfirm("Backup wirklich importieren? Die aktuelle Datenbank wird vorher automatisch gesichert und dann ersetzt.")) return;
   await withActionButton(event, async () => {
     const response = await fetch("/api/backups/import", {
       method: "POST",
@@ -2898,11 +3533,13 @@ window.editDeck = editDeck;
 window.deleteDeck = deleteDeck;
 window.setDeckCover = setDeckCover;
 window.decrementSlot = decrementSlot;
+window.incrementSlot = incrementSlot;
 window.deleteSlot = deleteSlot;
 window.moveSlotZone = moveSlotZone;
 window.showCardPreview = showCardPreview;
 window.moveCardPreview = moveCardPreview;
 window.hideCardPreview = hideCardPreview;
 window.toggleCardTag = toggleCardTag;
+window.exportMissingSetCards = exportMissingSetCards;
 
 init().catch((error) => toast(error.message));

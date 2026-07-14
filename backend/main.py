@@ -25,6 +25,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from backend.ai_assistant import AiAssistantError, AiChatRequest, chat as ai_chat, status as ai_status
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -216,6 +218,19 @@ def db_dep():
         yield db
     finally:
         db.close()
+
+
+@app.get("/api/ai/status")
+def get_ai_status() -> dict[str, Any]:
+    return ai_status()
+
+
+@app.post("/api/ai/chat")
+def post_ai_chat(body: AiChatRequest, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    try:
+        return ai_chat(body, db)
+    except AiAssistantError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
 
 
 def backup_timestamp() -> str:
@@ -2973,6 +2988,59 @@ def collection_stats(db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]
     }
 
 
+@app.get("/api/collection/stats/sets/{set_code}/missing")
+def missing_set_prints(set_code: str, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    normalized_code = set_code.strip().lower()
+    if not re.fullmatch(r"[a-z0-9]{2,8}", normalized_code):
+        raise HTTPException(status_code=400, detail="Ungültiger Set-Code.")
+
+    set_row = db.execute(
+        """
+        SELECT lower(set_code) AS code,
+               COALESCE(MAX(set_name), upper(set_code)) AS name
+        FROM cards
+        WHERE lower(set_code) = ?
+        GROUP BY lower(set_code)
+        """,
+        (normalized_code,),
+    ).fetchone()
+    if not set_row:
+        raise HTTPException(status_code=404, detail="Set nicht gefunden.")
+
+    language_row = db.execute(
+        "SELECT 1 FROM cards WHERE lower(set_code) = ? AND lang = 'en' LIMIT 1",
+        (normalized_code,),
+    ).fetchone()
+    language = "en" if language_row else None
+    language_filter = "AND c.lang = 'en'" if language else ""
+    missing_rows = db.execute(
+        f"""
+        SELECT c.name,
+               c.printed_name,
+               c.collector_number,
+               c.rarity,
+               c.type_line
+        FROM cards c
+        WHERE lower(c.set_code) = ?
+          {language_filter}
+          AND c.collector_number NOT LIKE 'A-%'
+          AND c.collector_number NOT IN (
+            SELECT owned.collector_number
+            FROM card_copies cc
+            JOIN cards owned ON owned.id = cc.card_id
+            WHERE cc.is_proxy = 0 AND lower(owned.set_code) = ?
+          )
+        GROUP BY c.collector_number
+        ORDER BY CAST(c.collector_number AS INTEGER), c.collector_number, c.name
+        """,
+        (normalized_code, normalized_code),
+    ).fetchall()
+    return {
+        "set": {"code": set_row["code"], "name": set_row["name"]},
+        "cards": [dict(row) for row in missing_rows],
+    }
+
+
 @app.get("/api/collection/summary")
 def collection_summary(
     q: str = "",
@@ -4296,6 +4364,31 @@ def decrement_slot(deck_id: int, slot_id: int, db: sqlite3.Connection = Depends(
         "remaining_quantity": remaining_quantity,
         "freed_card_id": card_id,
         "freed_copies": freed_copies,
+        "counts": card_collection_counts(db, card_id),
+    }
+
+
+@app.post("/api/decks/{deck_id}/slots/{slot_id}/increment")
+def increment_slot(deck_id: int, slot_id: int, db: sqlite3.Connection = Depends(db_dep)) -> dict[str, Any]:
+    slot = db.execute(
+        "SELECT card_id, quantity FROM deck_slots WHERE id = ? AND deck_id = ?",
+        (slot_id, deck_id),
+    ).fetchone()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot nicht gefunden.")
+
+    card_id = int(slot["card_id"])
+    quantity = int(slot["quantity"] or 0) + 1
+    db.execute(
+        "UPDATE deck_slots SET quantity = ? WHERE id = ? AND deck_id = ?",
+        (quantity, slot_id, deck_id),
+    )
+    reconcile_deck_assignments(deck_id, db)
+    sync_active_variant_if_not_editing(deck_id, db)
+    db.commit()
+    return {
+        "quantity": quantity,
+        "card_id": card_id,
         "counts": card_collection_counts(db, card_id),
     }
 
