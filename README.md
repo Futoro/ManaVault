@@ -17,6 +17,7 @@ ManaVault ist ein selbst gehosteter Sammlungs- und Deckmanager fuer **Magic: The
 - QR-Codes fuer schreibgeschuetzte Deckansichten
 - optionaler, passwortgeschuetzter externer Zugriff
 - SQLite-Backups und optionales taegliches rclone-Backup
+- optionaler, kontextabhängiger KI-Assistent über kostenlose lokale Modelle oder OpenAI
 
 ## Schnellstart
 
@@ -29,8 +30,7 @@ sudo apt install -y git python3 python3-venv python3-pip \
 
 git clone https://github.com/Futoro/ManaVault.git
 cd ManaVault
-chmod +x scripts/*.sh
-sudo ./scripts/install.sh
+bash INSTALLIEREN.sh
 ./scripts/import-scryfall.sh
 ```
 
@@ -55,6 +55,7 @@ Bei einem Versionstag erzeugt GitHub automatisch saubere ZIP- und TAR-Pakete unt
 
 - [Installation und Betrieb](docs/INSTALLATION.md)
 - [Externer Zugriff und QR-Deckseiten](docs/REMOTE_ACCESS.md)
+- [ManaVault Assistent einrichten](docs/AI_ASSISTANT.md)
 - [Sicherheit](SECURITY.md)
 - [Aenderungen](CHANGELOG.md)
 - [Mitwirken](CONTRIBUTING.md)
